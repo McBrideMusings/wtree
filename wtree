@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+# wtree — git worktree helper
+# Manages worktrees under .worktrees/ with optional GitHub issue integration.
+
+cmd="${1:-help}"
+
+_wtree_sanitize() {
+  echo "$1" | tr '[:upper:]' '[:lower:]' | tr -s ' /:'"'"'".,' '-' | tr -cd '[:alnum:]-' | sed 's/--*/-/g; s/^-//; s/-$//'
+}
+
+_wtree_copy_configs() {
+  local repo_root="$1" worktree_path="$2"
+  find "$repo_root" -maxdepth 1 -name '.env*' -exec cp {} "$worktree_path/" \;
+  if [ -f "$repo_root/.claude/settings.local.json" ]; then
+    mkdir -p "$worktree_path/.claude"
+    cp "$repo_root/.claude/settings.local.json" "$worktree_path/.claude/"
+  fi
+}
+
+_wtree_install_deps() {
+  local worktree_path="$1"
+  if [ -f "$worktree_path/bun.lockb" ] || [ -f "$worktree_path/bun.lock" ]; then
+    echo "Installing dependencies with bun..."
+    (cd "$worktree_path" && bun install)
+  elif [ -f "$worktree_path/package-lock.json" ]; then
+    echo "Installing dependencies with npm..."
+    (cd "$worktree_path" && npm install)
+  elif [ -f "$worktree_path/yarn.lock" ]; then
+    echo "Installing dependencies with yarn..."
+    (cd "$worktree_path" && yarn install)
+  elif [ -f "$worktree_path/pnpm-lock.yaml" ]; then
+    echo "Installing dependencies with pnpm..."
+    (cd "$worktree_path" && pnpm install)
+  fi
+}
+
+_wtree_is_own_repo() {
+  local remote_url
+  remote_url=$(git remote get-url origin 2>/dev/null) || return 0
+  [[ "$remote_url" == *"McBrideMusings"* ]]
+}
+
+_wtree_ensure_gitignore() {
+  local repo_root="$1"
+  if ! grep -qxF '.worktrees' "$repo_root/.gitignore" 2>/dev/null; then
+    echo '.worktrees' >> "$repo_root/.gitignore"
+    echo "Added .worktrees to .gitignore"
+  fi
+}
+
+case "$cmd" in
+  add)
+    shift
+    slug=""
+    issue_arg=""
+    branch_arg=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --issue|-i)
+          issue_arg="$2"
+          shift 2
+          ;;
+        --branch|-b)
+          branch_arg="$2"
+          shift 2
+          ;;
+        *)
+          slug="$1"
+          shift
+          ;;
+      esac
+    done
+
+    repo_root="$(git rev-parse --show-toplevel)" || exit 1
+
+    if [ -n "$issue_arg" ]; then
+      if [[ "$issue_arg" =~ ^[0-9]+$ ]]; then
+        issue_title=$(gh issue view "$issue_arg" --json title -q .title) || {
+          echo "Failed to fetch issue #$issue_arg" >&2
+          exit 1
+        }
+        slug="${issue_arg}-$(_wtree_sanitize "$issue_title")"
+        echo "Issue #$issue_arg: $issue_title"
+      else
+        issue_url=$(gh issue create --title "$issue_arg" --body "Created via wtree") || {
+          echo "Failed to create issue" >&2
+          exit 1
+        }
+        issue_num=$(echo "$issue_url" | grep -o '[0-9]\+$')
+        slug="${issue_num}-$(_wtree_sanitize "$issue_arg")"
+        echo "Created issue #$issue_num: $issue_arg"
+      fi
+    fi
+
+    if [ -n "$branch_arg" ]; then
+      if git show-ref --verify --quiet "refs/heads/$branch_arg" 2>/dev/null; then
+        echo "Branch: $branch_arg (local)"
+      elif git show-ref --verify --quiet "refs/remotes/origin/$branch_arg" 2>/dev/null; then
+        echo "Branch: $branch_arg (remote)"
+      else
+        echo "Branch '$branch_arg' not found locally or on origin. Try 'git fetch' first." >&2
+        exit 1
+      fi
+      slug="$(_wtree_sanitize "$branch_arg")"
+    fi
+
+    if [ -z "$slug" ]; then
+      echo "Usage: wtree add <n>  OR  wtree add --issue <number|title>  OR  wtree add --branch <branch>" >&2
+      exit 1
+    fi
+
+    _wtree_ensure_gitignore "$repo_root"
+    mkdir -p "$repo_root/.worktrees"
+    worktree_path="$repo_root/.worktrees/$slug"
+
+    if [ -n "$branch_arg" ]; then
+      git worktree add "$worktree_path" "$branch_arg" || exit 1
+      branch="$branch_arg"
+    else
+      if _wtree_is_own_repo; then
+        branch="$slug"
+      else
+        branch="pierce/$slug"
+      fi
+      git worktree add -b "$branch" "$worktree_path" || exit 1
+    fi
+
+    _wtree_copy_configs "$repo_root" "$worktree_path"
+    _wtree_install_deps "$worktree_path"
+
+    echo ""
+    echo "Worktree: $worktree_path"
+    echo "Branch:   $branch"
+    ;;
+
+  ls|list)
+    git worktree list
+    ;;
+
+  rm|remove)
+    target="$2"
+    force_flag="${3:---no-force}"
+    for arg in "$@"; do [[ "$arg" == "--force" ]] && force_flag="--force"; done
+
+    if [ -z "$target" ]; then
+      current="$(git rev-parse --show-toplevel 2>/dev/null)"
+      common="$(cd "$current" 2>/dev/null && git rev-parse --git-common-dir 2>/dev/null)"
+      # If common dir isn't just .git, we're in a worktree
+      if [ -n "$current" ] && [ -n "$common" ] && [[ "$common" != ".git" ]]; then
+        target="$current"
+        echo "Detected worktree: $target"
+      else
+        echo "Active worktrees:"
+        git worktree list
+        echo ""
+        printf "Enter worktree directory name to remove: "
+        read target
+        [ -z "$target" ] && exit 1
+      fi
+    fi
+    if [[ "$target" != */* ]]; then
+      repo_root="$(git rev-parse --show-toplevel)" || exit 1
+      common="$(git rev-parse --git-common-dir 2>/dev/null)"
+      if [[ "$common" != ".git" ]]; then
+        repo_root="$(cd "$common/.." && pwd)"
+      fi
+      target="$repo_root/.worktrees/$target"
+    fi
+    if [[ "$(pwd)" == "$target"* ]]; then
+      # Resolve main repo root via git common dir
+      main_root="$(cd "$target" && git rev-parse --git-common-dir 2>/dev/null)"
+      main_root="$(cd "$target" && cd "$main_root/.." && pwd)"
+      echo "Changing directory to $main_root"
+      cd "$main_root"
+    fi
+    echo "Removing worktree: $target"
+    if [[ "$force_flag" == "--force" ]]; then
+      git worktree remove --force "$target" && echo "Done." || exit 1
+    else
+      git worktree remove "$target" && echo "Done." || {
+        echo "Failed. Use 'wtree rm --force' to force removal."
+        exit 1
+      }
+    fi
+    ;;
+
+  *)
+    echo "Usage: wtree <command> [args]"
+    echo ""
+    echo "Commands:"
+    echo "  add <n>                   Create worktree in .worktrees/<n>"
+    echo "  add --branch <branch>      Check out existing branch into worktree"
+    echo "  add --issue <num>         Fetch issue, create <num>-<title>"
+    echo "  add --issue \"title\"       Create new GH issue, create <num>-<title>"
+    echo "  ls                        List all worktrees"
+    echo "  rm [name] [--force]       Remove worktree (auto-detects if run from inside one)"
+    echo ""
+    echo "Branches prefixed with pierce/ for repos not owned by McBrideMusings."
+    ;;
+esac
