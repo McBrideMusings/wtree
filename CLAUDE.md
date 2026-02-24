@@ -20,8 +20,10 @@ LICENSE        # MIT
 - **No install script** — sourcing directly from the repo means edits take effect immediately in new shells, and updating is just `git pull`.
 - **Worktrees go in `.worktrees/`** — created at the repo root of whatever project you're in, auto-added to `.gitignore`.
 - **Branch prefix logic** — branches are prefixed with `pierce/` for repos not owned by McBrideMusings (see `_wtree_is_own_repo`).
+- **Uses `return 1` for errors** — since the script is sourced, `return` exits the script without killing the calling shell.
+- **Tab completion** — a `_wtree` zsh completion function lives in `~/.zshrc` (not in this repo). It completes subcommands, flags for `add`, branch names after `--branch`/`-b`, and worktree names for `rm`/`remove`.
 
 ## Working on This Script
 
 - Test changes by opening a new shell (or `source ~/.zshrc`) and running `wtree` commands in any git repo.
-- The script uses `exit 1` for errors (not `return`) since it's sourced inside a function wrapper — `exit` terminates the sourced script, not the shell.
+- Tab completion changes require `source ~/.zshrc` or a new shell to take effect.

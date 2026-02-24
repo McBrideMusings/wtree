@@ -71,20 +71,20 @@ case "$cmd" in
       esac
     done
 
-    repo_root="$(git rev-parse --show-toplevel)" || exit 1
+    repo_root="$(git rev-parse --show-toplevel)" || return 1
 
     if [ -n "$issue_arg" ]; then
       if [[ "$issue_arg" =~ ^[0-9]+$ ]]; then
         issue_title=$(gh issue view "$issue_arg" --json title -q .title) || {
           echo "Failed to fetch issue #$issue_arg" >&2
-          exit 1
+          return 1
         }
         slug="${issue_arg}-$(_wtree_sanitize "$issue_title")"
         echo "Issue #$issue_arg: $issue_title"
       else
         issue_url=$(gh issue create --title "$issue_arg" --body "Created via wtree") || {
           echo "Failed to create issue" >&2
-          exit 1
+          return 1
         }
         issue_num=$(echo "$issue_url" | grep -o '[0-9]\+$')
         slug="${issue_num}-$(_wtree_sanitize "$issue_arg")"
@@ -99,14 +99,14 @@ case "$cmd" in
         echo "Branch: $branch_arg (remote)"
       else
         echo "Branch '$branch_arg' not found locally or on origin. Try 'git fetch' first." >&2
-        exit 1
+        return 1
       fi
       slug="$(_wtree_sanitize "$branch_arg")"
     fi
 
     if [ -z "$slug" ]; then
       echo "Usage: wtree add <n>  OR  wtree add --issue <number|title>  OR  wtree add --branch <branch>" >&2
-      exit 1
+      return 1
     fi
 
     _wtree_ensure_gitignore "$repo_root"
@@ -114,7 +114,7 @@ case "$cmd" in
     worktree_path="$repo_root/.worktrees/$slug"
 
     if [ -n "$branch_arg" ]; then
-      git worktree add "$worktree_path" "$branch_arg" || exit 1
+      git worktree add "$worktree_path" "$branch_arg" || return 1
       branch="$branch_arg"
     else
       if _wtree_is_own_repo; then
@@ -122,7 +122,7 @@ case "$cmd" in
       else
         branch="pierce/$slug"
       fi
-      git worktree add -b "$branch" "$worktree_path" || exit 1
+      git worktree add -b "$branch" "$worktree_path" || return 1
     fi
 
     _wtree_copy_configs "$repo_root" "$worktree_path"
@@ -155,11 +155,11 @@ case "$cmd" in
         echo ""
         printf "Enter worktree directory name to remove: "
         read target
-        [ -z "$target" ] && exit 1
+        [ -z "$target" ] && return 1
       fi
     fi
     if [[ "$target" != */* ]]; then
-      repo_root="$(git rev-parse --show-toplevel)" || exit 1
+      repo_root="$(git rev-parse --show-toplevel)" || return 1
       common="$(git rev-parse --git-common-dir 2>/dev/null)"
       if [[ "$common" != ".git" ]]; then
         repo_root="$(cd "$common/.." && pwd)"
@@ -175,11 +175,11 @@ case "$cmd" in
     fi
     echo "Removing worktree: $target"
     if [[ "$force_flag" == "--force" ]]; then
-      git worktree remove --force "$target" && echo "Done." || exit 1
+      git worktree remove --force "$target" && echo "Done." || return 1
     else
       git worktree remove "$target" && echo "Done." || {
         echo "Failed. Use 'wtree rm --force' to force removal."
-        exit 1
+        return 1
       }
     fi
     ;;
