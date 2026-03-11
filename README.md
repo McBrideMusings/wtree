@@ -15,13 +15,19 @@ The script must be `source`d (not executed) so that `wtree rm` can `cd` the call
 ## Usage
 
 ```
-wtree add <name>                  Create worktree in .worktrees/<name>
-wtree add --branch <branch>       Check out existing branch into worktree
-wtree add --issue <num>           Fetch GitHub issue, create <num>-<title>
-wtree add --issue "title"         Create new GitHub issue, create <num>-<title>
+wtree                             Interactive picker (cd/remove worktrees)
+wtree add <input>                 Smart-add worktree from any input:
+  PR URL                            https://github.com/owner/repo/pull/123
+  Issue URL                         https://github.com/owner/repo/issues/45
+  Issue/PR number                   42 or #42
+  Branch name                       feature/foo or pierce/my-branch
+  New name                          my-feature (creates new branch)
 wtree ls                          List all worktrees
 wtree rm [name] [--force]         Remove worktree (auto-detects if inside one)
+wtree help                        Show help
 ```
+
+`add` auto-detects the input type, queries GitHub when needed, shows a confirmation before creating anything, and offers to cd into an existing worktree if one already matches.
 
 ## Behavior
 
