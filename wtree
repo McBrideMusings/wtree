@@ -376,11 +376,11 @@ case "$cmd" in
     # Check for existing worktree with this branch
     if _wtree_find_existing "$branch"; then
       echo "Worktree already exists for branch \"$branch\": $_wt_existing_path"
-      printf "cd into it? [Y/n] "
+      printf "cd into it? (enter: yes · esc: no) "
       local _ans
       read -rsk1 _ans
       echo ""
-      if [[ "$_ans" == "" || "$_ans" == [yY] ]]; then
+      if [[ "$_ans" == $'\n' || "$_ans" == "" || "$_ans" == [yY] ]]; then
         cd "$_wt_existing_path"
         echo "Now in: $(pwd)"
         return 0
@@ -395,11 +395,11 @@ case "$cmd" in
     echo "  Worktree: .worktrees/$slug"
     echo "  Branch:   $branch"
     echo ""
-    printf "Continue? [Y/n] "
+    printf "Continue? (enter: yes · esc: no) "
     local _ans
     read -rsk1 _ans
     echo ""
-    if [[ "$_ans" != "" && "$_ans" != [yY] ]]; then
+    if [[ "$_ans" != $'\n' && "$_ans" != "" && "$_ans" != [yY] ]]; then
       echo "Cancelled."
       return 1
     fi
@@ -420,6 +420,15 @@ case "$cmd" in
     echo ""
     echo "Worktree: $worktree_path"
     echo "Branch:   $branch"
+    echo ""
+
+    printf "cd into it? (enter: yes · esc: no) "
+    local _cd_ans
+    read -rsk1 _cd_ans
+    echo ""
+    if [[ "$_cd_ans" == $'\n' || "$_cd_ans" == "" || "$_cd_ans" == [yY] ]]; then
+      cd "$worktree_path"
+    fi
     ;;
 
   ls|list)
