@@ -409,6 +409,9 @@ case "$cmd" in
     mkdir -p "$repo_root/.worktrees"
 
     if [ "$is_existing_branch" = true ]; then
+      if ! git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
+        git fetch origin "$branch" || { echo "Failed to fetch branch \"$branch\" from origin" >&2; return 1; }
+      fi
       git worktree add "$worktree_path" "$branch" || return 1
     else
       git worktree add -b "$branch" "$worktree_path" || return 1
