@@ -121,8 +121,10 @@ _wtree_do_remove() {
     git worktree remove "$target" 2>&1 && echo "Done." || {
       echo ""
       printf "Removal failed. Force remove? [y/N] "
-      local _confirm
-      read -rsk1 _confirm
+      local _confirm=""
+      while [[ -z "$_confirm" || "$_confirm" == $'\n' || "$_confirm" == $'\r' ]]; do
+        read -rsk1 _confirm
+      done
       echo ""
       if [[ "$_confirm" == [yY] ]]; then
         git worktree remove --force "$target" && echo "Done." || return 1
