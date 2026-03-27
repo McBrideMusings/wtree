@@ -168,7 +168,6 @@ _wtree_picker() {
   done
 
   _wtree_draw_menu() {
-    printf "\033[u\033[J"
     local i
     for (( i=0; i<_total; i++ )); do
       if (( i == _sel )); then
@@ -179,8 +178,11 @@ _wtree_picker() {
     done
   }
 
+  _wtree_clear_menu() {
+    printf "\033[%dA\033[J" "$_total"
+  }
+
   echo "$prompt_text"
-  printf "\033[s"
   _wtree_draw_menu
   _wt_picked_action=""
   _wt_picked_name=""
@@ -196,9 +198,9 @@ _wtree_picker() {
           B) (( _sel < _total - 1 )) && (( _sel++ )) ;;
         esac
       else
-        printf "\033[u\033[J"
+        _wtree_clear_menu
         echo "Cancelled."
-        unfunction _wtree_draw_menu 2>/dev/null
+        unfunction _wtree_draw_menu _wtree_clear_menu 2>/dev/null
         return 1
       fi
     elif [[ "$_key" == $'\n' ]]; then
@@ -208,21 +210,22 @@ _wtree_picker() {
       _wt_picked_action="remove"
       break
     elif [[ "$_key" == "q" ]]; then
-      printf "\033[u\033[J"
+      _wtree_clear_menu
       echo "Cancelled."
-      unfunction _wtree_draw_menu 2>/dev/null
+      unfunction _wtree_draw_menu _wtree_clear_menu 2>/dev/null
       return 1
     elif [[ "$_key" == "j" ]]; then
       (( _sel < _total - 1 )) && (( _sel++ ))
     elif [[ "$_key" == "k" ]]; then
       (( _sel > 0 )) && (( _sel-- ))
     fi
+    _wtree_clear_menu
     _wtree_draw_menu
   done
 
-  printf "\033[u\033[J"
+  _wtree_clear_menu
   _wt_picked_name="${_wt_names[$((_sel+1))]}"
-  unfunction _wtree_draw_menu 2>/dev/null
+  unfunction _wtree_draw_menu _wtree_clear_menu 2>/dev/null
 }
 
 _wtree_do_add() {
