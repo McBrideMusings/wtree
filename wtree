@@ -168,17 +168,19 @@ _wtree_picker() {
   done
 
   _wtree_draw_menu() {
+    printf "\033[u\033[J"
     local i
     for (( i=0; i<_total; i++ )); do
       if (( i == _sel )); then
-        printf "\033[K  \033[7m▸ %s \033[0m\n" "${_wt_display[$((i+1))]}"
+        printf "  \033[7m▸ %s \033[0m\n" "${_wt_display[$((i+1))]}"
       else
-        printf "\033[K    %s\n" "${_wt_display[$((i+1))]}"
+        printf "    %s\n" "${_wt_display[$((i+1))]}"
       fi
     done
   }
 
   echo "$prompt_text"
+  printf "\033[s"
   _wtree_draw_menu
   _wt_picked_action=""
   _wt_picked_name=""
@@ -194,7 +196,7 @@ _wtree_picker() {
           B) (( _sel < _total - 1 )) && (( _sel++ )) ;;
         esac
       else
-        printf "\033[${_total}A\033[J"
+        printf "\033[u\033[J"
         echo "Cancelled."
         unfunction _wtree_draw_menu 2>/dev/null
         return 1
@@ -206,7 +208,7 @@ _wtree_picker() {
       _wt_picked_action="remove"
       break
     elif [[ "$_key" == "q" ]]; then
-      printf "\033[${_total}A\033[J"
+      printf "\033[u\033[J"
       echo "Cancelled."
       unfunction _wtree_draw_menu 2>/dev/null
       return 1
@@ -215,13 +217,206 @@ _wtree_picker() {
     elif [[ "$_key" == "k" ]]; then
       (( _sel > 0 )) && (( _sel-- ))
     fi
-    printf "\033[${_total}A"
     _wtree_draw_menu
   done
 
-  printf "\033[${_total}A\033[J"
+  printf "\033[u\033[J"
   _wt_picked_name="${_wt_names[$((_sel+1))]}"
   unfunction _wtree_draw_menu 2>/dev/null
+}
+
+_wtree_do_add() {
+  local input="$1"
+  if [ -z "$input" ]; then
+    echo "Usage: wtree <input>" >&2
+    echo "  <input> can be: branch name, issue/PR number (#N or N), or GitHub PR/issue URL" >&2
+    return 1
+  fi
+
+  local repo_root
+  repo_root=$(_wtree_repo_root) || return 1
+
+  # Classify input
+  local _type="" _num=""
+  case "$input" in
+    https://github.com/*/pull/[0-9]*)
+      _type="pr"
+      local _stripped="${input#https://github.com/}"
+      local _url_nwo="${_stripped%%/pull/*}"
+      local _rest="${_stripped#*/pull/}"
+      _num="${_rest%%/*}"
+      # Validate repo match
+      local _current_nwo
+      _current_nwo=$(_wtree_get_nwo) || { echo "Could not determine current repo from origin" >&2; return 1; }
+      local _lower_url _lower_current
+      _lower_url=$(echo "$_url_nwo" | tr '[:upper:]' '[:lower:]')
+      _lower_current=$(echo "$_current_nwo" | tr '[:upper:]' '[:lower:]')
+      if [[ "$_lower_url" != "$_lower_current" ]]; then
+        echo "Repo mismatch: URL is for $_url_nwo but you're in $_current_nwo" >&2
+        return 1
+      fi
+      ;;
+    https://github.com/*/issues/[0-9]*)
+      _type="issue"
+      local _stripped="${input#https://github.com/}"
+      local _url_nwo="${_stripped%%/issues/*}"
+      local _rest="${_stripped#*/issues/}"
+      _num="${_rest%%/*}"
+      # Validate repo match
+      local _current_nwo
+      _current_nwo=$(_wtree_get_nwo) || { echo "Could not determine current repo from origin" >&2; return 1; }
+      local _lower_url _lower_current
+      _lower_url=$(echo "$_url_nwo" | tr '[:upper:]' '[:lower:]')
+      _lower_current=$(echo "$_current_nwo" | tr '[:upper:]' '[:lower:]')
+      if [[ "$_lower_url" != "$_lower_current" ]]; then
+        echo "Repo mismatch: URL is for $_url_nwo but you're in $_current_nwo" >&2
+        return 1
+      fi
+      ;;
+    *)
+      local _stripped_hash="${input#\#}"
+      if [[ "$_stripped_hash" =~ ^[0-9]+$ ]]; then
+        _type="number"
+        _num="$_stripped_hash"
+      else
+        _type="text"
+      fi
+      ;;
+  esac
+
+  # Resolve to branch, slug, and summary
+  local branch="" slug="" summary="" is_existing_branch=false
+
+  case "$_type" in
+    pr)
+      local _pr_data head_branch pr_title
+      _pr_data=$(gh pr view "$_num" --json headRefName,title -q '.headRefName + "\t" + .title') || {
+        echo "Failed to fetch PR #$_num" >&2
+        return 1
+      }
+      head_branch="${_pr_data%%	*}"
+      pr_title="${_pr_data#*	}"
+      branch="$head_branch"
+      slug="$(_wtree_sanitize "$head_branch")"
+      summary="PR #$_num: $pr_title → branch \"$head_branch\""
+      is_existing_branch=true
+      ;;
+    issue)
+      local issue_title
+      issue_title=$(gh issue view "$_num" --json title -q .title) || {
+        echo "Failed to fetch issue #$_num" >&2
+        return 1
+      }
+      slug="${_num}-$(_wtree_sanitize "$issue_title")"
+      summary="Issue #$_num: $issue_title"
+      ;;
+    number)
+      local _pr_data head_branch pr_title
+      if _pr_data=$(gh pr view "$_num" --json headRefName,title -q '.headRefName + "\t" + .title' 2>/dev/null); then
+        head_branch="${_pr_data%%	*}"
+        pr_title="${_pr_data#*	}"
+        branch="$head_branch"
+        slug="$(_wtree_sanitize "$head_branch")"
+        summary="PR #$_num: $pr_title → branch \"$head_branch\""
+        is_existing_branch=true
+      else
+        local issue_title
+        issue_title=$(gh issue view "$_num" --json title -q .title) || {
+          echo "#$_num is not a PR or issue in this repo" >&2
+          return 1
+        }
+        slug="${_num}-$(_wtree_sanitize "$issue_title")"
+        summary="Issue #$_num: $issue_title"
+      fi
+      ;;
+    text)
+      if git show-ref --verify --quiet "refs/heads/$input" 2>/dev/null; then
+        branch="$input"
+        slug="$(_wtree_sanitize "$input")"
+        summary="Branch \"$input\" (local)"
+        is_existing_branch=true
+      elif git show-ref --verify --quiet "refs/remotes/origin/$input" 2>/dev/null; then
+        branch="$input"
+        slug="$(_wtree_sanitize "$input")"
+        summary="Branch \"$input\" (remote)"
+        is_existing_branch=true
+      else
+        slug="$(_wtree_sanitize "$input")"
+        summary="New branch from \"$input\""
+      fi
+      ;;
+  esac
+
+  # Determine branch name if not already set (issue / new branch cases)
+  if [ -z "$branch" ]; then
+    if _wtree_is_own_repo; then
+      branch="$slug"
+    elif [[ "$_type" == "text" && "$input" == */* ]]; then
+      branch="$input"
+    else
+      branch="pierce/$slug"
+    fi
+  fi
+
+  # Check for existing worktree with this branch
+  if _wtree_find_existing "$branch"; then
+    echo "Worktree already exists for branch \"$branch\": $_wt_existing_path"
+    printf "cd into it? (enter: yes · esc: no) "
+    local _ans
+    read -rsk1 _ans
+    echo ""
+    if [[ "$_ans" == $'\n' || "$_ans" == "" || "$_ans" == [yY] ]]; then
+      cd "$_wt_existing_path"
+      echo "Now in: $(pwd)"
+      return 0
+    fi
+    return 1
+  fi
+
+  # Confirm
+  local worktree_path="$repo_root/.worktrees/$slug"
+  echo ""
+  echo "  Detected: $summary"
+  echo "  Worktree: .worktrees/$slug"
+  echo "  Branch:   $branch"
+  echo ""
+  printf "Continue? (enter: yes · esc: no) "
+  local _ans
+  read -rsk1 _ans
+  echo ""
+  if [[ "$_ans" != $'\n' && "$_ans" != "" && "$_ans" != [yY] ]]; then
+    echo "Cancelled."
+    return 1
+  fi
+
+  # Create worktree
+  _wtree_ensure_gitignore "$repo_root"
+  mkdir -p "$repo_root/.worktrees"
+
+  if [ "$is_existing_branch" = true ]; then
+    if ! git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
+      git fetch origin "$branch" || { echo "Failed to fetch branch \"$branch\" from origin" >&2; return 1; }
+    fi
+    git worktree add "$worktree_path" "$branch" || return 1
+  else
+    git worktree add -b "$branch" "$worktree_path" || return 1
+  fi
+
+  _wtree_copy_configs "$repo_root" "$worktree_path"
+  _wtree_install_deps "$worktree_path"
+
+  echo ""
+  echo "Worktree: $worktree_path"
+  echo "Branch:   $branch"
+  echo ""
+
+  printf "cd into it? (enter: yes · esc: no) "
+  local _cd_ans
+  read -rsk1 _cd_ans
+  echo ""
+  if [[ "$_cd_ans" == $'\n' || "$_cd_ans" == "" || "$_cd_ans" == [yY] ]]; then
+    cd "$worktree_path"
+  fi
 }
 
 case "$cmd" in
@@ -245,195 +440,7 @@ case "$cmd" in
 
   add)
     shift
-    local input="$1"
-    if [ -z "$input" ]; then
-      echo "Usage: wtree add <input>" >&2
-      echo "  <input> can be: branch name, issue/PR number (#N or N), or GitHub PR/issue URL" >&2
-      return 1
-    fi
-
-    local repo_root
-    repo_root=$(_wtree_repo_root) || return 1
-
-    # Classify input
-    local _type="" _num=""
-    case "$input" in
-      https://github.com/*/pull/[0-9]*)
-        _type="pr"
-        local _stripped="${input#https://github.com/}"
-        local _url_nwo="${_stripped%%/pull/*}"
-        local _rest="${_stripped#*/pull/}"
-        _num="${_rest%%/*}"
-        # Validate repo match
-        local _current_nwo
-        _current_nwo=$(_wtree_get_nwo) || { echo "Could not determine current repo from origin" >&2; return 1; }
-        local _lower_url _lower_current
-        _lower_url=$(echo "$_url_nwo" | tr '[:upper:]' '[:lower:]')
-        _lower_current=$(echo "$_current_nwo" | tr '[:upper:]' '[:lower:]')
-        if [[ "$_lower_url" != "$_lower_current" ]]; then
-          echo "Repo mismatch: URL is for $_url_nwo but you're in $_current_nwo" >&2
-          return 1
-        fi
-        ;;
-      https://github.com/*/issues/[0-9]*)
-        _type="issue"
-        local _stripped="${input#https://github.com/}"
-        local _url_nwo="${_stripped%%/issues/*}"
-        local _rest="${_stripped#*/issues/}"
-        _num="${_rest%%/*}"
-        # Validate repo match
-        local _current_nwo
-        _current_nwo=$(_wtree_get_nwo) || { echo "Could not determine current repo from origin" >&2; return 1; }
-        local _lower_url _lower_current
-        _lower_url=$(echo "$_url_nwo" | tr '[:upper:]' '[:lower:]')
-        _lower_current=$(echo "$_current_nwo" | tr '[:upper:]' '[:lower:]')
-        if [[ "$_lower_url" != "$_lower_current" ]]; then
-          echo "Repo mismatch: URL is for $_url_nwo but you're in $_current_nwo" >&2
-          return 1
-        fi
-        ;;
-      *)
-        local _stripped_hash="${input#\#}"
-        if [[ "$_stripped_hash" =~ ^[0-9]+$ ]]; then
-          _type="number"
-          _num="$_stripped_hash"
-        else
-          _type="text"
-        fi
-        ;;
-    esac
-
-    # Resolve to branch, slug, and summary
-    local branch="" slug="" summary="" is_existing_branch=false
-
-    case "$_type" in
-      pr)
-        local _pr_data head_branch pr_title
-        _pr_data=$(gh pr view "$_num" --json headRefName,title -q '.headRefName + "\t" + .title') || {
-          echo "Failed to fetch PR #$_num" >&2
-          return 1
-        }
-        head_branch="${_pr_data%%	*}"
-        pr_title="${_pr_data#*	}"
-        branch="$head_branch"
-        slug="$(_wtree_sanitize "$head_branch")"
-        summary="PR #$_num: $pr_title → branch \"$head_branch\""
-        is_existing_branch=true
-        ;;
-      issue)
-        local issue_title
-        issue_title=$(gh issue view "$_num" --json title -q .title) || {
-          echo "Failed to fetch issue #$_num" >&2
-          return 1
-        }
-        slug="${_num}-$(_wtree_sanitize "$issue_title")"
-        summary="Issue #$_num: $issue_title"
-        ;;
-      number)
-        local _pr_data head_branch pr_title
-        if _pr_data=$(gh pr view "$_num" --json headRefName,title -q '.headRefName + "\t" + .title' 2>/dev/null); then
-          head_branch="${_pr_data%%	*}"
-          pr_title="${_pr_data#*	}"
-          branch="$head_branch"
-          slug="$(_wtree_sanitize "$head_branch")"
-          summary="PR #$_num: $pr_title → branch \"$head_branch\""
-          is_existing_branch=true
-        else
-          local issue_title
-          issue_title=$(gh issue view "$_num" --json title -q .title) || {
-            echo "#$_num is not a PR or issue in this repo" >&2
-            return 1
-          }
-          slug="${_num}-$(_wtree_sanitize "$issue_title")"
-          summary="Issue #$_num: $issue_title"
-        fi
-        ;;
-      text)
-        if git show-ref --verify --quiet "refs/heads/$input" 2>/dev/null; then
-          branch="$input"
-          slug="$(_wtree_sanitize "$input")"
-          summary="Branch \"$input\" (local)"
-          is_existing_branch=true
-        elif git show-ref --verify --quiet "refs/remotes/origin/$input" 2>/dev/null; then
-          branch="$input"
-          slug="$(_wtree_sanitize "$input")"
-          summary="Branch \"$input\" (remote)"
-          is_existing_branch=true
-        else
-          slug="$(_wtree_sanitize "$input")"
-          summary="New branch from \"$input\""
-        fi
-        ;;
-    esac
-
-    # Determine branch name if not already set (issue / new branch cases)
-    if [ -z "$branch" ]; then
-      if _wtree_is_own_repo; then
-        branch="$slug"
-      else
-        branch="pierce/$slug"
-      fi
-    fi
-
-    # Check for existing worktree with this branch
-    if _wtree_find_existing "$branch"; then
-      echo "Worktree already exists for branch \"$branch\": $_wt_existing_path"
-      printf "cd into it? (enter: yes · esc: no) "
-      local _ans
-      read -rsk1 _ans
-      echo ""
-      if [[ "$_ans" == $'\n' || "$_ans" == "" || "$_ans" == [yY] ]]; then
-        cd "$_wt_existing_path"
-        echo "Now in: $(pwd)"
-        return 0
-      fi
-      return 1
-    fi
-
-    # Confirm
-    local worktree_path="$repo_root/.worktrees/$slug"
-    echo ""
-    echo "  Detected: $summary"
-    echo "  Worktree: .worktrees/$slug"
-    echo "  Branch:   $branch"
-    echo ""
-    printf "Continue? (enter: yes · esc: no) "
-    local _ans
-    read -rsk1 _ans
-    echo ""
-    if [[ "$_ans" != $'\n' && "$_ans" != "" && "$_ans" != [yY] ]]; then
-      echo "Cancelled."
-      return 1
-    fi
-
-    # Create worktree
-    _wtree_ensure_gitignore "$repo_root"
-    mkdir -p "$repo_root/.worktrees"
-
-    if [ "$is_existing_branch" = true ]; then
-      if ! git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
-        git fetch origin "$branch" || { echo "Failed to fetch branch \"$branch\" from origin" >&2; return 1; }
-      fi
-      git worktree add "$worktree_path" "$branch" || return 1
-    else
-      git worktree add -b "$branch" "$worktree_path" || return 1
-    fi
-
-    _wtree_copy_configs "$repo_root" "$worktree_path"
-    _wtree_install_deps "$worktree_path"
-
-    echo ""
-    echo "Worktree: $worktree_path"
-    echo "Branch:   $branch"
-    echo ""
-
-    printf "cd into it? (enter: yes · esc: no) "
-    local _cd_ans
-    read -rsk1 _cd_ans
-    echo ""
-    if [[ "$_cd_ans" == $'\n' || "$_cd_ans" == "" || "$_cd_ans" == [yY] ]]; then
-      cd "$worktree_path"
-    fi
+    _wtree_do_add "$1"
     ;;
 
   ls|list)
@@ -471,12 +478,13 @@ case "$cmd" in
     echo ""
     echo "Commands:"
     echo "  (no args)                 Interactive worktree picker (cd/remove)"
-    echo "  add <input>               Smart-add worktree from any input:"
+    echo "  <input>                   Smart-add worktree from any input:"
     echo "    PR URL                    https://github.com/owner/repo/pull/123"
     echo "    Issue URL                 https://github.com/owner/repo/issues/45"
     echo "    Issue/PR number           42 or #42"
     echo "    Branch name               feature/foo or pierce/my-branch"
     echo "    New name                  my-feature (creates new branch)"
+    echo "  add <input>               Same as above (explicit form)"
     echo "  ls                        List all worktrees"
     echo "  rm [name] [--force]       Remove worktree (auto-detects or picker)"
     echo "  help                      Show this help"
@@ -485,8 +493,6 @@ case "$cmd" in
     ;;
 
   *)
-    echo "Unknown command: $cmd" >&2
-    echo "Run 'wtree help' for usage." >&2
-    return 1
+    _wtree_do_add "$cmd"
     ;;
 esac
