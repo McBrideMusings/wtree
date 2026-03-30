@@ -167,13 +167,17 @@ _wtree_picker() {
     _wt_display+=("${_wt_names[$((_i+1))]}  (${_branch})")
   done
 
+  local _term_width="${COLUMNS:-80}"
+
   _wtree_draw_menu() {
-    local i
+    local i _line_text
     for (( i=0; i<_total; i++ )); do
       if (( i == _sel )); then
-        printf "  \033[7m▸ %s \033[0m\n" "${_wt_display[$((i+1))]}"
+        _line_text="  ▸ ${_wt_display[$((i+1))]}"
+        printf "\033[7m%.*s\033[0m\n" "$_term_width" "$_line_text"
       else
-        printf "    %s\n" "${_wt_display[$((i+1))]}"
+        _line_text="    ${_wt_display[$((i+1))]}"
+        printf "%.*s\n" "$_term_width" "$_line_text"
       fi
     done
   }
