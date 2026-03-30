@@ -174,7 +174,7 @@ _wtree_picker() {
     for (( i=0; i<_total; i++ )); do
       if (( i == _sel )); then
         _line_text="  ▸ ${_wt_display[$((i+1))]}"
-        printf "\033[7m%.*s\033[0m\n" "$_term_width" "$_line_text"
+        printf "\033[7m%-*.*s\033[0m\n" "$_term_width" "$_term_width" "$_line_text"
       else
         _line_text="    ${_wt_display[$((i+1))]}"
         printf "%.*s\n" "$_term_width" "$_line_text"
