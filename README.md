@@ -33,7 +33,7 @@ wtree help                        Show help
 
 - Worktrees are created under `.worktrees/` at the repo root (auto-added to `.gitignore`)
 - `.env*` files and `.claude/settings.local.json` are copied into new worktrees
-- Dependencies are auto-installed (bun, npm, yarn, or pnpm based on lockfile)
+- Dependencies are auto-installed in every directory with a lockfile (bun, npm, yarn, or pnpm), so subprojects in a monorepo get set up too — `node_modules`, `.git`, `.worktrees`, and common build/cache dirs are skipped during the scan
 - Branches are prefixed with `pierce/` for repos not owned by McBrideMusings
 - Issue-derived branch/worktree slugs are compacted by default to keep names shorter while preserving the issue number
 - Optional tuning: `WTREE_ISSUE_WORD_LIMIT` (default `4`) and `WTREE_ISSUE_SLUG_MAX_LEN` (default `36`)

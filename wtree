@@ -85,19 +85,45 @@ _wtree_copy_configs() {
 
 _wtree_install_deps() {
   local worktree_path="$1"
-  if [ -f "$worktree_path/bun.lockb" ] || [ -f "$worktree_path/bun.lock" ]; then
-    echo "Installing dependencies with bun..."
-    (cd "$worktree_path" && bun install)
-  elif [ -f "$worktree_path/package-lock.json" ]; then
-    echo "Installing dependencies with npm..."
-    (cd "$worktree_path" && npm install)
-  elif [ -f "$worktree_path/yarn.lock" ]; then
-    echo "Installing dependencies with yarn..."
-    (cd "$worktree_path" && yarn install)
-  elif [ -f "$worktree_path/pnpm-lock.yaml" ]; then
-    echo "Installing dependencies with pnpm..."
-    (cd "$worktree_path" && pnpm install)
-  fi
+  local -A _dir_tool=()
+  local _lockfile _dir _name _new_priority _current_priority
+
+  while IFS= read -r _lockfile; do
+    [ -z "$_lockfile" ] && continue
+    _dir="${_lockfile%/*}"
+    _name="${_lockfile##*/}"
+    case "$_name" in
+      bun.lockb|bun.lock) _new_priority=4 ;;
+      pnpm-lock.yaml)     _new_priority=3 ;;
+      yarn.lock)          _new_priority=2 ;;
+      package-lock.json)  _new_priority=1 ;;
+      *) continue ;;
+    esac
+    _current_priority="${_dir_tool[$_dir]%%:*}"
+    [ -z "$_current_priority" ] && _current_priority=0
+    if (( _new_priority > _current_priority )); then
+      case "$_name" in
+        bun.lockb|bun.lock) _dir_tool[$_dir]="4:bun" ;;
+        pnpm-lock.yaml)     _dir_tool[$_dir]="3:pnpm" ;;
+        yarn.lock)          _dir_tool[$_dir]="2:yarn" ;;
+        package-lock.json)  _dir_tool[$_dir]="1:npm" ;;
+      esac
+    fi
+  done < <(find "$worktree_path" \
+    \( -type d \( -name node_modules -o -name .git -o -name .worktrees -o -name .next -o -name dist -o -name build -o -name target -o -name .venv -o -name venv -o -name .turbo -o -name .cache \) \) -prune \
+    -o -type f \( -name bun.lockb -o -name bun.lock -o -name pnpm-lock.yaml -o -name yarn.lock -o -name package-lock.json \) -print 2>/dev/null)
+
+  (( ${#_dir_tool[@]} == 0 )) && return 0
+
+  local _k _tool _rel
+  for _k in "${(@ko)_dir_tool}"; do
+    _tool="${_dir_tool[$_k]#*:}"
+    _rel="${_k#$worktree_path}"
+    _rel="${_rel#/}"
+    [ -z "$_rel" ] && _rel="."
+    echo "Installing dependencies with $_tool in $_rel..."
+    (cd "$_k" && "$_tool" install) || echo "  (install failed in $_rel)" >&2
+  done
 }
 
 _wtree_is_own_repo() {
