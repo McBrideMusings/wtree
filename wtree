@@ -85,6 +85,10 @@ _wtree_copy_configs() {
 
 _wtree_install_deps() {
   local worktree_path="$1"
+  if [ -n "${WTREE_SKIP_INSTALL:-}" ]; then
+    echo "Skipping dependency install (WTREE_SKIP_INSTALL set)."
+    return 0
+  fi
   local -A _dir_tool=()
   local _lockfile _dir _name _new_priority _current_priority
 
@@ -198,6 +202,17 @@ _wtree_do_remove() {
     target="$repo_root/.worktrees/$target"
   fi
 
+  # Capture the worktree's branch before removal so we can offer to delete it after.
+  local _target_branch=""
+  while IFS= read -r _line; do
+    local _p="${_line%% *}"
+    if [[ "$_p" == "$target" ]]; then
+      _target_branch="${_line##*\[}"
+      _target_branch="${_target_branch%\]*}"
+      break
+    fi
+  done < <(git worktree list)
+
   if [[ "$(pwd)" == "$target"* ]]; then
     local main_root
     main_root="$(git -C "$target" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
@@ -206,24 +221,44 @@ _wtree_do_remove() {
     cd "$main_root"
   fi
 
+  local _removed=false
   echo "Removing worktree: $target"
   if [[ "$force_flag" == "--force" ]]; then
-    git worktree remove --force "$target" && echo "Done." || return 1
+    git worktree remove --force "$target" && { echo "Done."; _removed=true; } || return 1
   else
-    git worktree remove "$target" 2>&1 && echo "Done." || {
+    git worktree remove "$target" 2>&1 && { echo "Done."; _removed=true; } || {
       echo ""
-      printf "Removal failed. Force remove? [y/N] "
-      local _confirm=""
-      while [[ -z "$_confirm" || "$_confirm" == $'\n' || "$_confirm" == $'\r' ]]; do
-        read -rsk1 _confirm
-      done
+      printf "Removal failed. Force remove? (enter: yes · esc: no) "
+      local _confirm
+      read -rsk1 _confirm
       echo ""
-      if [[ "$_confirm" == [yY] ]]; then
-        git worktree remove --force "$target" && echo "Done." || return 1
+      if [[ "$_confirm" == $'\n' || "$_confirm" == "" || "$_confirm" == [yY] ]]; then
+        git worktree remove --force "$target" && { echo "Done."; _removed=true; } || return 1
       else
         return 1
       fi
     }
+  fi
+
+  if [ "$_removed" = true ] && [ -n "$_target_branch" ] \
+     && git show-ref --verify --quiet "refs/heads/$_target_branch" 2>/dev/null; then
+    printf "Also delete branch \"%s\"? (enter: yes · esc: no) " "$_target_branch"
+    local _del
+    read -rsk1 _del
+    echo ""
+    if [[ "$_del" == $'\n' || "$_del" == "" || "$_del" == [yY] ]]; then
+      if ! git branch -d "$_target_branch" 2>/dev/null; then
+        printf "Branch is unmerged. Force delete? (enter: yes · esc: no) "
+        local _del2
+        read -rsk1 _del2
+        echo ""
+        if [[ "$_del2" == $'\n' || "$_del2" == "" || "$_del2" == [yY] ]]; then
+          git branch -D "$_target_branch" && echo "Force-deleted branch \"$_target_branch\"."
+        fi
+      else
+        echo "Deleted branch \"$_target_branch\"."
+      fi
+    fi
   fi
 }
 
@@ -254,9 +289,15 @@ _wtree_picker() {
   local -a _wt_display=()
   for (( _i=0; _i<_total; _i++ )); do
     local _full="${_wt_lines[$((_i+1))]}"
+    local _path="${_full%% *}"
     local _branch="${_full##*\[}"
     _branch="${_branch%\]*}"
-    _wt_display+=("${_wt_names[$((_i+1))]}  (${_branch})")
+    local _dirty=""
+    [ -n "$(git -C "$_path" status --porcelain 2>/dev/null)" ] && _dirty=" *"
+    local _when
+    _when=$(git -C "$_path" log -1 --format=%cr HEAD 2>/dev/null)
+    [ -n "$_when" ] && _when=" · $_when"
+    _wt_display+=("${_wt_names[$((_i+1))]}  (${_branch})${_dirty}${_when}")
   done
 
   local _term_width="${COLUMNS:-80}"
@@ -460,13 +501,14 @@ _wtree_do_add() {
   # If we derived the branch name (issue / new text), the branch itself may
   # already exist even though no worktree references it. Detect that so we
   # check it out instead of trying to re-create it.
+  local branch_note=""
   if [ "$is_existing_branch" = false ]; then
     if git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
       is_existing_branch=true
-      summary="$summary (branch \"$branch\" already exists locally)"
+      branch_note="branch already exists locally — will check it out"
     elif git show-ref --verify --quiet "refs/remotes/origin/$branch" 2>/dev/null; then
       is_existing_branch=true
-      summary="$summary (branch \"$branch\" already exists on origin)"
+      branch_note="branch already exists on origin — will check it out"
     fi
   fi
 
@@ -484,6 +526,7 @@ _wtree_do_add() {
   echo "  Detected: $summary"
   echo "  Worktree: .worktrees/$slug"
   echo "  Branch:   $branch"
+  [ -n "$branch_note" ] && echo "  Note:     $branch_note"
   echo ""
   printf "Continue? (enter: yes · esc: no) "
   local _ans
