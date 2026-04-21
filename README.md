@@ -27,7 +27,7 @@ wtree rm [name] [--force]         Remove worktree (auto-detects if inside one)
 wtree help                        Show help
 ```
 
-`add` auto-detects the input type, queries GitHub when needed, shows a confirmation before creating anything, and offers to cd into an existing worktree if one already matches.
+`add` auto-detects the input type, queries GitHub when needed, shows a confirmation before creating anything, reuses an existing branch (local or remote) when the derived name already exists, and cd's into the resulting worktree on completion.
 
 ## Behavior
 

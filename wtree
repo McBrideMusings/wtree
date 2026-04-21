@@ -457,19 +457,25 @@ _wtree_do_add() {
     fi
   fi
 
+  # If we derived the branch name (issue / new text), the branch itself may
+  # already exist even though no worktree references it. Detect that so we
+  # check it out instead of trying to re-create it.
+  if [ "$is_existing_branch" = false ]; then
+    if git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
+      is_existing_branch=true
+      summary="$summary (branch \"$branch\" already exists locally)"
+    elif git show-ref --verify --quiet "refs/remotes/origin/$branch" 2>/dev/null; then
+      is_existing_branch=true
+      summary="$summary (branch \"$branch\" already exists on origin)"
+    fi
+  fi
+
   # Check for existing worktree with this branch
   if _wtree_find_existing "$branch"; then
     echo "Worktree already exists for branch \"$branch\": $_wt_existing_path"
-    printf "cd into it? (enter: yes · esc: no) "
-    local _ans
-    read -rsk1 _ans
-    echo ""
-    if [[ "$_ans" == $'\n' || "$_ans" == "" || "$_ans" == [yY] ]]; then
-      cd "$_wt_existing_path"
-      echo "Now in: $(pwd)"
-      return 0
-    fi
-    return 1
+    cd "$_wt_existing_path"
+    echo "Now in: $(pwd)"
+    return 0
   fi
 
   # Confirm
@@ -507,15 +513,8 @@ _wtree_do_add() {
   echo ""
   echo "Worktree: $worktree_path"
   echo "Branch:   $branch"
-  echo ""
-
-  printf "cd into it? (enter: yes · esc: no) "
-  local _cd_ans
-  read -rsk1 _cd_ans
-  echo ""
-  if [[ "$_cd_ans" == $'\n' || "$_cd_ans" == "" || "$_cd_ans" == [yY] ]]; then
-    cd "$worktree_path"
-  fi
+  cd "$worktree_path"
+  echo "Now in: $(pwd)"
 }
 
 case "$cmd" in
