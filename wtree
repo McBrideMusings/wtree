@@ -131,9 +131,19 @@ _wtree_install_deps() {
 }
 
 # Run a command with a timeout in seconds. Exits 124 if killed.
-# Uses perl (guaranteed on macOS) so we don't depend on GNU coreutils `timeout`.
+# Prefers `timeout` / `gtimeout` if present, falls back to a perl wrapper,
+# and finally runs the command uncapped if neither is available.
 _wtree_sh_timeout() {
-  perl -e 'my $t=shift; my $pid=fork(); if(!defined $pid){exit 127} if($pid==0){exec(@ARGV) or exit 127} local $SIG{ALRM}=sub{kill 9,$pid;exit 124}; alarm $t; waitpid $pid,0; exit($?>>8)' "$@"
+  local _sec="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$_sec" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$_sec" "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'my $t=shift; my $pid=fork(); if(!defined $pid){exit 127} if($pid==0){exec(@ARGV) or exit 127} local $SIG{ALRM}=sub{kill 9,$pid;exit 124}; alarm $t; waitpid $pid,0; exit($?>>8)' "$_sec" "$@"
+  else
+    "$@"
+  fi
 }
 
 _wtree_is_own_repo() {
@@ -314,7 +324,9 @@ _wtree_picker() {
     wait
   fi
 
-  local -a _wt_display=()
+  # Parallel arrays of per-worktree display components, composed lazily in
+  # _wtree_draw_menu so resize and width-aware field dropping both work.
+  local -a _wt_branches=() _wt_dirty=() _wt_when=() _wt_current=()
   for (( _i=0; _i<_total; _i++ )); do
     local _full="${_wt_lines[$((_i+1))]}"
     local _path="${_full%% *}"
@@ -324,13 +336,10 @@ _wtree_picker() {
     if [ -n "$_tmpdir" ] && [ -f "$_tmpdir/$_i" ]; then
       IFS=$'\t' read -r _d _w < "$_tmpdir/$_i"
     fi
-    local _dirty=""
-    [ -n "$_d" ] && _dirty=" *"
-    local _when=""
-    [ -n "$_w" ] && _when=" · $_w"
-    local _current=""
-    [ -n "$_current_wt" ] && [[ "$_path" == "$_current_wt" ]] && _current=" (current)"
-    _wt_display+=("${_wt_names[$((_i+1))]}  (${_branch})${_dirty}${_when}${_current}")
+    _wt_branches+=("$_branch")
+    _wt_dirty+=("$([ -n "$_d" ] && echo " *")")
+    _wt_when+=("$([ -n "$_w" ] && echo " · $_w")")
+    _wt_current+=("$([ -n "$_current_wt" ] && [[ "$_path" == "$_current_wt" ]] && echo " (current)")")
   done
 
   [ -n "$_tmpdir" ] && rm -rf "$_tmpdir"
@@ -338,13 +347,27 @@ _wtree_picker() {
   local _term_width="${COLUMNS:-80}"
 
   _wtree_draw_menu() {
-    local i _line_text
+    local i _prefix _core _extras _avail _f _line_text
     for (( i=0; i<_total; i++ )); do
       if (( i == _sel )); then
-        _line_text="  ▸ ${_wt_display[$((i+1))]}"
+        _prefix="  ▸ "
+      else
+        _prefix="    "
+      fi
+      _core="${_wt_names[$((i+1))]}  (${_wt_branches[$((i+1))]})"
+      _extras=""
+      _avail=$(( _term_width - ${#_prefix} - ${#_core} ))
+      # Priority: current > dirty > age. Drop lower-priority fields first
+      # when the row would overflow.
+      for _f in "${_wt_current[$((i+1))]}" "${_wt_dirty[$((i+1))]}" "${_wt_when[$((i+1))]}"; do
+        if [ -n "$_f" ] && (( ${#_extras} + ${#_f} <= _avail )); then
+          _extras+="$_f"
+        fi
+      done
+      _line_text="${_prefix}${_core}${_extras}"
+      if (( i == _sel )); then
         printf "\033[7m%-*.*s\033[0m\n" "$_term_width" "$_term_width" "$_line_text"
       else
-        _line_text="    ${_wt_display[$((i+1))]}"
         printf "%.*s\n" "$_term_width" "$_line_text"
       fi
     done
@@ -353,6 +376,13 @@ _wtree_picker() {
   _wtree_clear_menu() {
     printf "\033[%dA\033[J" "$_total"
   }
+
+  _wtree_on_resize() {
+    _term_width="${COLUMNS:-80}"
+    _wtree_clear_menu
+    _wtree_draw_menu
+  }
+  trap _wtree_on_resize WINCH
 
   echo "$prompt_text"
   _wtree_draw_menu
@@ -372,7 +402,8 @@ _wtree_picker() {
       else
         _wtree_clear_menu
         echo "Cancelled."
-        unfunction _wtree_draw_menu _wtree_clear_menu 2>/dev/null
+        trap - WINCH
+        unfunction _wtree_draw_menu _wtree_clear_menu _wtree_on_resize 2>/dev/null
         return 1
       fi
     elif [[ "$_key" == $'\n' ]]; then
@@ -397,7 +428,8 @@ _wtree_picker() {
 
   _wtree_clear_menu
   _wt_picked_name="${_wt_names[$((_sel+1))]}"
-  unfunction _wtree_draw_menu _wtree_clear_menu 2>/dev/null
+  trap - WINCH
+  unfunction _wtree_draw_menu _wtree_clear_menu _wtree_on_resize 2>/dev/null
 }
 
 _wtree_do_add() {
