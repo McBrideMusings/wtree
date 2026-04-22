@@ -187,23 +187,55 @@ _wtree_repo_root() {
   echo "$repo_root"
 }
 
-# Check if a worktree already exists for a given branch
-# Sets _wt_existing_path if found
+# Check if a worktree already exists for a given branch (porcelain parsing
+# so branch names containing [ or ] aren't mangled).
+# Sets _wt_existing_path if found.
 _wtree_find_existing() {
   local target_branch="$1"
   local repo_root
   repo_root=$(_wtree_repo_root) || return 1
   _wt_existing_path=""
-  while IFS= read -r _line; do
-    local _path="${_line%% *}"
-    [[ "$_path" == "$repo_root" ]] && continue
-    local _branch="${_line##*\[}"
-    _branch="${_branch%\]*}"
-    if [[ "$_branch" == "$target_branch" ]]; then
-      _wt_existing_path="$_path"
+  local _cur_path="" _cur_branch=""
+  _wtree_try_match() {
+    if [[ "$_cur_branch" == "$target_branch" && -n "$_cur_path" && "$_cur_path" != "$repo_root" ]]; then
+      _wt_existing_path="$_cur_path"
       return 0
     fi
-  done < <(git worktree list)
+    return 1
+  }
+  while IFS= read -r _line; do
+    case "$_line" in
+      "worktree "*) _cur_path="${_line#worktree }"; _cur_branch="" ;;
+      "branch refs/heads/"*) _cur_branch="${_line#branch refs/heads/}" ;;
+      "")
+        _wtree_try_match && { unfunction _wtree_try_match 2>/dev/null; return 0; }
+        _cur_path=""; _cur_branch=""
+        ;;
+    esac
+  done < <(git worktree list --porcelain)
+  _wtree_try_match && { unfunction _wtree_try_match 2>/dev/null; return 0; }
+  unfunction _wtree_try_match 2>/dev/null
+  return 1
+}
+
+# Return the branch name of the worktree at $1 using porcelain output.
+_wtree_branch_for_path() {
+  local target="$1" _cur_path="" _cur_branch=""
+  while IFS= read -r _line; do
+    case "$_line" in
+      "worktree "*)
+        _cur_path="${_line#worktree }"
+        _cur_branch=""
+        ;;
+      "branch refs/heads/"*)
+        _cur_branch="${_line#branch refs/heads/}"
+        if [[ "$_cur_path" == "$target" ]]; then
+          echo "$_cur_branch"
+          return 0
+        fi
+        ;;
+    esac
+  done < <(git worktree list --porcelain)
   return 1
 }
 
@@ -219,15 +251,8 @@ _wtree_do_remove() {
   fi
 
   # Capture the worktree's branch before removal so we can offer to delete it after.
-  local _target_branch=""
-  while IFS= read -r _line; do
-    local _p="${_line%% *}"
-    if [[ "$_p" == "$target" ]]; then
-      _target_branch="${_line##*\[}"
-      _target_branch="${_target_branch%\]*}"
-      break
-    fi
-  done < <(git worktree list)
+  local _target_branch
+  _target_branch=$(_wtree_branch_for_path "$target")
 
   if [[ "$(pwd)" == "$target"* ]]; then
     local main_root
@@ -261,7 +286,7 @@ _wtree_do_remove() {
     local _pr_note=""
     if command -v gh >/dev/null 2>&1; then
       local _merged_pr
-      _merged_pr=$(gh pr list --head "$_target_branch" --state merged --json number --jq '.[0].number' 2>/dev/null)
+      _merged_pr=$(_wtree_sh_timeout 3 gh pr list --head "$_target_branch" --state merged --json number --jq '.[0].number' 2>/dev/null)
       [ -n "$_merged_pr" ] && _pr_note=" (merged via PR #$_merged_pr)"
     fi
     printf "Also delete branch \"%s\"%s? (enter: yes · esc: no) " "$_target_branch" "$_pr_note"
@@ -371,10 +396,13 @@ _wtree_picker() {
         printf "%.*s\n" "$_term_width" "$_line_text"
       fi
     done
+    local _footer="  ↑/↓ or j/k navigate · enter: $default_action · x: remove · q: quit"
+    printf "\033[2m%.*s\033[0m\n" "$_term_width" "$_footer"
   }
 
+  # Clear _total menu rows plus one footer row.
   _wtree_clear_menu() {
-    printf "\033[%dA\033[J" "$_total"
+    printf "\033[%dA\033[J" "$(( _total + 1 ))"
   }
 
   _wtree_on_resize() {
@@ -382,10 +410,12 @@ _wtree_picker() {
     _wtree_clear_menu
     _wtree_draw_menu
   }
-  trap _wtree_on_resize WINCH
 
   echo "$prompt_text"
   _wtree_draw_menu
+  # Install resize handler only after the first draw so it never fires into
+  # an unpopulated state.
+  trap _wtree_on_resize WINCH
   _wt_picked_action=""
   _wt_picked_name=""
 
