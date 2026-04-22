@@ -130,6 +130,12 @@ _wtree_install_deps() {
   done
 }
 
+# Run a command with a timeout in seconds. Exits 124 if killed.
+# Uses perl (guaranteed on macOS) so we don't depend on GNU coreutils `timeout`.
+_wtree_sh_timeout() {
+  perl -e 'my $t=shift; my $pid=fork(); if(!defined $pid){exit 127} if($pid==0){exec(@ARGV) or exit 127} local $SIG{ALRM}=sub{kill 9,$pid;exit 124}; alarm $t; waitpid $pid,0; exit($?>>8)' "$@"
+}
+
 _wtree_is_own_repo() {
   local remote_url
   remote_url=$(git remote get-url origin 2>/dev/null) || return 0
@@ -242,21 +248,22 @@ _wtree_do_remove() {
 
   if [ "$_removed" = true ] && [ -n "$_target_branch" ] \
      && git show-ref --verify --quiet "refs/heads/$_target_branch" 2>/dev/null; then
-    printf "Also delete branch \"%s\"? (enter: yes · esc: no) " "$_target_branch"
+    local _pr_note=""
+    if command -v gh >/dev/null 2>&1; then
+      local _merged_pr
+      _merged_pr=$(gh pr list --head "$_target_branch" --state merged --json number --jq '.[0].number' 2>/dev/null)
+      [ -n "$_merged_pr" ] && _pr_note=" (merged via PR #$_merged_pr)"
+    fi
+    printf "Also delete branch \"%s\"%s? (enter: yes · esc: no) " "$_target_branch" "$_pr_note"
     local _del
     read -rsk1 _del
     echo ""
     if [[ "$_del" == $'\n' || "$_del" == "" || "$_del" == [yY] ]]; then
-      if ! git branch -d "$_target_branch" 2>/dev/null; then
-        printf "Branch is unmerged. Force delete? (enter: yes · esc: no) "
-        local _del2
-        read -rsk1 _del2
-        echo ""
-        if [[ "$_del2" == $'\n' || "$_del2" == "" || "$_del2" == [yY] ]]; then
-          git branch -D "$_target_branch" && echo "Force-deleted branch \"$_target_branch\"."
-        fi
-      else
+      if git branch -d "$_target_branch" 2>/dev/null; then
         echo "Deleted branch \"$_target_branch\"."
+      else
+        git branch -D "$_target_branch" \
+          && echo "Force-deleted branch \"$_target_branch\" (not merged locally)."
       fi
     fi
   fi
@@ -286,19 +293,47 @@ _wtree_picker() {
   fi
 
   local _sel=0 _total=${#_wt_names[@]} _key
+  local _current_wt
+  _current_wt=$(git rev-parse --show-toplevel 2>/dev/null)
+
+  # Fetch per-worktree status in parallel. Each query is capped at 1s so a
+  # stalled filesystem can't hang the picker.
+  local _tmpdir
+  _tmpdir=$(mktemp -d 2>/dev/null)
+  if [ -n "$_tmpdir" ]; then
+    for (( _i=0; _i<_total; _i++ )); do
+      local _p="${_wt_lines[$((_i+1))]%% *}"
+      (
+        local _d=""
+        [ -n "$(_wtree_sh_timeout 1 git -C "$_p" status --porcelain 2>/dev/null)" ] && _d="*"
+        local _w
+        _w=$(_wtree_sh_timeout 1 git -C "$_p" log -1 --format=%cr HEAD 2>/dev/null)
+        printf '%s\t%s\n' "$_d" "$_w" > "$_tmpdir/$_i"
+      ) &
+    done
+    wait
+  fi
+
   local -a _wt_display=()
   for (( _i=0; _i<_total; _i++ )); do
     local _full="${_wt_lines[$((_i+1))]}"
     local _path="${_full%% *}"
     local _branch="${_full##*\[}"
     _branch="${_branch%\]*}"
+    local _d="" _w=""
+    if [ -n "$_tmpdir" ] && [ -f "$_tmpdir/$_i" ]; then
+      IFS=$'\t' read -r _d _w < "$_tmpdir/$_i"
+    fi
     local _dirty=""
-    [ -n "$(git -C "$_path" status --porcelain 2>/dev/null)" ] && _dirty=" *"
-    local _when
-    _when=$(git -C "$_path" log -1 --format=%cr HEAD 2>/dev/null)
-    [ -n "$_when" ] && _when=" · $_when"
-    _wt_display+=("${_wt_names[$((_i+1))]}  (${_branch})${_dirty}${_when}")
+    [ -n "$_d" ] && _dirty=" *"
+    local _when=""
+    [ -n "$_w" ] && _when=" · $_w"
+    local _current=""
+    [ -n "$_current_wt" ] && [[ "$_path" == "$_current_wt" ]] && _current=" (current)"
+    _wt_display+=("${_wt_names[$((_i+1))]}  (${_branch})${_dirty}${_when}${_current}")
   done
+
+  [ -n "$_tmpdir" ] && rm -rf "$_tmpdir"
 
   local _term_width="${COLUMNS:-80}"
 
