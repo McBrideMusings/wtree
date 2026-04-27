@@ -90,7 +90,7 @@ func runAdd(ctx context.Context, input string) error {
 	}
 	fmt.Fprintln(os.Stderr)
 
-	if !confirm("Continue? [Y/n] ") {
+	if !confirm("Continue? (enter/y: yes · esc/n: cancel) ") {
 		fmt.Fprintln(os.Stderr, "Cancelled.")
 		return nil
 	}

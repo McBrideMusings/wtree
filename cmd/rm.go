@@ -56,6 +56,10 @@ func runRemove(ctx context.Context, target string, force bool) error {
 			}
 			target = top
 			fmt.Fprintf(os.Stderr, "Detected worktree: %s\n", target)
+			if !force && !confirm("Remove this worktree? (enter/y: yes · esc/n: cancel) ") {
+				fmt.Fprintln(os.Stderr, "Cancelled.")
+				return nil
+			}
 		} else {
 			return runRemoveViaPicker(ctx)
 		}
@@ -92,7 +96,7 @@ func doRemove(ctx context.Context, repoRoot, target string, force bool) error {
 	} else {
 		if err := gitwt.Remove(ctx, target, false); err != nil {
 			fmt.Fprintln(os.Stderr)
-			if !confirm("Removal failed. Force remove? [Y/n] ") {
+			if !confirm("Removal failed. Force remove? (enter/y: yes · esc/n: cancel) ") {
 				return err
 			}
 			if err := gitwt.Remove(ctx, target, true); err != nil {
@@ -106,7 +110,7 @@ func doRemove(ctx context.Context, repoRoot, target string, force bool) error {
 
 	if branch != "" && gitwt.BranchExistsLocal(ctx, branch) {
 		prNote := mergedPRNote(ctx, branch)
-		prompt := fmt.Sprintf("Also delete branch %q%s? [Y/n] ", branch, prNote)
+		prompt := fmt.Sprintf("Also delete branch %q%s? (enter/y: yes · esc/n: skip) ", branch, prNote)
 		if confirm(prompt) {
 			if err := gitwt.DeleteBranch(ctx, branch); err == nil {
 				fmt.Fprintf(os.Stderr, "Deleted branch %q.\n", branch)
