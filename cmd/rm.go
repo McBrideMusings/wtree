@@ -44,6 +44,8 @@ func runRemove(ctx context.Context, target string, force bool) error {
 		return errors.New("not inside a git repository")
 	}
 
+	explicitTarget := target != ""
+
 	if target == "" {
 		inside, err := gitwt.InsideLinkedWorktree(ctx)
 		if err != nil {
@@ -70,6 +72,14 @@ func runRemove(ctx context.Context, target string, force bool) error {
 	}
 	target = filepath.Clean(target)
 
+	if !force && explicitTarget {
+		name := filepath.Base(target)
+		if !confirm(fmt.Sprintf("Remove worktree %q? (enter/y: yes · esc/n: cancel) ", name)) {
+			fmt.Fprintln(os.Stderr, "Cancelled.")
+			return nil
+		}
+	}
+
 	return doRemove(ctx, repoRoot, target, force)
 }
 
@@ -88,25 +98,19 @@ func doRemove(ctx context.Context, repoRoot, target string, force bool) error {
 	}
 
 	fmt.Fprintf(os.Stderr, "Removing worktree: %s\n", target)
-	if force {
+	if err := gitwt.Remove(ctx, target, force); err != nil {
+		if force {
+			return err
+		}
+		fmt.Fprintln(os.Stderr)
+		if !confirm("Removal failed. Force remove? (enter/y: yes · esc/n: cancel) ") {
+			return err
+		}
 		if err := gitwt.Remove(ctx, target, true); err != nil {
 			return err
 		}
-		fmt.Fprintln(os.Stderr, "Done.")
-	} else {
-		if err := gitwt.Remove(ctx, target, false); err != nil {
-			fmt.Fprintln(os.Stderr)
-			if !confirm("Removal failed. Force remove? (enter/y: yes · esc/n: cancel) ") {
-				return err
-			}
-			if err := gitwt.Remove(ctx, target, true); err != nil {
-				return err
-			}
-			fmt.Fprintln(os.Stderr, "Done.")
-		} else {
-			fmt.Fprintln(os.Stderr, "Done.")
-		}
 	}
+	fmt.Fprintln(os.Stderr, "Done.")
 
 	if branch != "" && gitwt.BranchExistsLocal(ctx, branch) {
 		prNote := mergedPRNote(ctx, branch)
@@ -114,8 +118,10 @@ func doRemove(ctx context.Context, repoRoot, target string, force bool) error {
 		if confirm(prompt) {
 			if err := gitwt.DeleteBranch(ctx, branch); err == nil {
 				fmt.Fprintf(os.Stderr, "Deleted branch %q.\n", branch)
-			} else if err := gitwt.ForceDeleteBranch(ctx, branch); err == nil {
-				fmt.Fprintf(os.Stderr, "Force-deleted branch %q (not merged locally).\n", branch)
+			} else if confirm("Branch not merged locally. Force-delete anyway? (enter/y: yes · esc/n: skip) ") {
+				if err := gitwt.ForceDeleteBranch(ctx, branch); err == nil {
+					fmt.Fprintf(os.Stderr, "Force-deleted branch %q.\n", branch)
+				}
 			}
 		}
 	}
