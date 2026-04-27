@@ -1,32 +1,38 @@
 # wtree
 
-Bash wrapper around `git worktree`. Single-file script, no build system.
+Go binary that wraps `git worktree`. The main logic lives in the binary; a small shell function in `~/.zshrc` lets the parent shell `cd` into the result.
 
 ## Structure
 
 ```
-wtree          # The script (sourced, not executed)
+main.go                # entry point
+cmd/                   # cobra subcommands (add, rm, ls, picker dispatch)
+internal/
+  gitwt/               # git worktree wrappers (porcelain parsing, repo root)
+  classify/            # input classifier (PR URL / issue URL / number / text)
+  slug/                # sanitize / issue-slug compaction (the only unit-tested piece)
+  gh/                  # gh CLI wrapper for PR + issue lookups
+  setup/               # post-create steps (.env*, .claude/settings.local.json, dep install)
+  picker/              # Bubble Tea TUI picker
+  shim/                # CD sentinel emitter (__WTREE_CD__:<path>)
 README.md
-LICENSE        # MIT
-.gitignore
+LICENSE
 ```
 
 ## Key Design Decisions
 
-- **Must be `source`d** — `wtree rm` needs to `cd` the calling shell back to the main repo when removing the current worktree. This requires a shell wrapper function in `.zshrc`:
-  ```bash
-  wtree() { source ~/Projects/wtree/wtree "$@"; }
-  ```
-- **No install script** — sourcing directly from the repo means edits take effect immediately in new shells, and updating is just `git pull`.
+- **Binary + shell shim** — the binary handles all logic and prints `__WTREE_CD__:<absolute-path>` to stdout when it wants the parent shell to change directory. The shim function in `.zshrc` parses that sentinel and `cd`s. Same pattern as `zoxide`'s `z`. This is what allows `wtree rm` of the current worktree to leave the user in the main repo, without forcing the script to be sourced.
+- **All non-CD output goes to stderr** — the sentinel is the only thing on stdout, so the shim's parser can't be confused by stray prints.
 - **Worktrees go in `.worktrees/`** — created at the repo root of whatever project you're in, auto-added to `.gitignore`.
-- **Branch prefix logic** — branches are prefixed with `pierce/` for repos not owned by McBrideMusings (see `_wtree_is_own_repo`).
-- **Uses `return 1` for errors** — since the script is sourced, `return` exits the script without killing the calling shell.
+- **Branch prefix logic** — branches are prefixed with `pierce/` for repos not owned by McBrideMusings (see `gitwt.IsOwnRepo`). Repos without an origin remote are treated as own repos for now.
 - **Smart `add` with auto-detection** — `wtree add <input>` classifies input as: GitHub PR URL, Issue URL, bare number (`#N` or `N`), or plain text (branch name). PR inputs check out the head branch; issue inputs construct a compacted `<num>-<slug>` from the title; numbers query GitHub to detect PR vs issue; plain text checks for existing branches before creating new ones. All paths confirm before creating.
-- **Interactive picker** — `wtree` with no args shows an arrow-key TUI to cd into or remove worktrees. The `rm` subcommand reuses the same picker when no target is specified.
+- **Interactive picker** — `wtree` with no args opens a Bubble Tea picker to cd into or remove worktrees. `wtree rm` reuses the same picker when invoked from the main repo with no target. The picker filters out the main worktree.
 - **Repo validation** — GitHub URLs are validated against the current repo's origin; mismatches show both repo names.
-- **Tab completion** — a `_wtree` zsh completion function lives in `~/.zshrc` (not in this repo). It completes subcommands and worktree names for `rm`/`remove`.
+- **Tab completion** — cobra generates completion scripts; run `wtree completion zsh > _wtree` and place on your fpath if desired.
 
-## Working on This Script
+## Working on This Code
 
-- Test changes by opening a new shell (or `source ~/.zshrc`) and running `wtree` commands in any git repo.
-- Tab completion changes require `source ~/.zshrc` or a new shell to take effect.
+- `go build -o bin/wtree .` produces a binary at `bin/`. The repo's `.gitignore` excludes `bin/`.
+- `go test ./...` — only `internal/slug` has unit tests (the most regression-prone piece). Everything else is thin glue over `git`/`gh` and is validated by manual end-to-end testing.
+- Avoid hand-editing files in `internal/picker` without testing in a real terminal — Bubble Tea bugs typically only surface under a TTY.
+- The `.zshrc` shim is documented in README.md. If you change the sentinel string, update both the binary (`internal/shim`) and the README simultaneously.

@@ -1,16 +1,35 @@
 # wtree
 
-A bash wrapper around `git worktree` that manages worktrees under `.worktrees/` with optional GitHub issue integration.
+A Go-based git worktree helper that manages worktrees under `.worktrees/` with optional GitHub issue/PR integration.
 
 ## Install
 
-Add to your `.zshrc`:
+Install the binary:
 
 ```bash
-wtree() { source ~/Projects/wtree/wtree "$@"; }
+go install github.com/McBrideMusings/wtree@latest
 ```
 
-The script must be `source`d (not executed) so that `wtree rm` can `cd` the calling shell back to the main repo when removing the current worktree.
+Then add this function to your `.zshrc` (or `.bashrc`):
+
+```zsh
+wtree() {
+  local out line cd_target=""
+  out=$(command wtree "$@")
+  local rc=$?
+  while IFS= read -r line; do
+    if [[ "$line" == "__WTREE_CD__:"* ]]; then
+      cd_target="${line#__WTREE_CD__:}"
+    else
+      print -- "$line"
+    fi
+  done <<< "$out"
+  [[ -n "$cd_target" ]] && cd -- "$cd_target"
+  return $rc
+}
+```
+
+The function captures stdout from the binary, watches for a `__WTREE_CD__:<path>` sentinel, and `cd`s the parent shell when one appears. This is what lets `wtree add` drop you into the new worktree and `wtree rm` cd back to the main repo when removing the current one.
 
 ## Usage
 
@@ -37,6 +56,12 @@ wtree help                        Show help
 - Branches are prefixed with `pierce/` for repos not owned by McBrideMusings
 - Issue-derived branch/worktree slugs are compacted by default to keep names shorter while preserving the issue number
 - Optional tuning: `WTREE_ISSUE_WORD_LIMIT` (default `4`), `WTREE_ISSUE_SLUG_MAX_LEN` (default `36`), and `WTREE_SKIP_INSTALL=1` to skip the dependency install step
+
+## Building from source
+
+```bash
+go build -o wtree .
+```
 
 ## License
 
