@@ -80,11 +80,19 @@ func runAdd(ctx context.Context, input string) error {
 		return nil
 	}
 
+	baseBranch := ""
+	if !isExisting {
+		baseBranch = gitwt.DefaultBranch(ctx)
+	}
+
 	worktreePath := filepath.Join(repoRoot, ".worktrees", resolved.slug)
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintf(os.Stderr, "  Detected: %s\n", resolved.summary)
 	fmt.Fprintf(os.Stderr, "  Worktree: .worktrees/%s\n", resolved.slug)
 	fmt.Fprintf(os.Stderr, "  Branch:   %s\n", branch)
+	if baseBranch != "" {
+		fmt.Fprintf(os.Stderr, "  From:     %s\n", baseBranch)
+	}
 	if branchNote != "" {
 		fmt.Fprintf(os.Stderr, "  Note:     %s\n", branchNote)
 	}
@@ -113,7 +121,7 @@ func runAdd(ctx context.Context, input string) error {
 			return err
 		}
 	} else {
-		if err := gitwt.AddNewBranch(ctx, worktreePath, branch); err != nil {
+		if err := gitwt.AddNewBranch(ctx, worktreePath, branch, baseBranch); err != nil {
 			return err
 		}
 	}

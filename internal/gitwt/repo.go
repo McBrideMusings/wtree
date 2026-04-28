@@ -139,6 +139,24 @@ func EnsureGitignore(repoRoot string) error {
 	return nil
 }
 
+// DefaultBranch returns the repo's default branch name by inspecting the
+// remote HEAD ref. Falls back to checking for common local branch names.
+func DefaultBranch(ctx context.Context) string {
+	out, err := runGitSilent(ctx, "symbolic-ref", "refs/remotes/origin/HEAD")
+	if err == nil {
+		parts := strings.Split(strings.TrimSpace(out), "/")
+		if len(parts) >= 2 {
+			return parts[len(parts)-1]
+		}
+	}
+	for _, name := range []string{"main", "master", "develop"} {
+		if BranchExistsLocal(ctx, name) {
+			return name
+		}
+	}
+	return ""
+}
+
 // BranchExistsLocal reports whether refs/heads/<branch> exists.
 func BranchExistsLocal(ctx context.Context, branch string) bool {
 	_, err := runGitSilent(ctx, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
