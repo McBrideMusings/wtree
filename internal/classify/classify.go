@@ -2,6 +2,7 @@
 package classify
 
 import (
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -26,9 +27,10 @@ type Result struct {
 }
 
 var (
-	prURL    = regexp.MustCompile(`^https://github\.com/([^/]+/[^/]+)/pull/(\d+)`)
-	issueURL = regexp.MustCompile(`^https://github\.com/([^/]+/[^/]+)/issues/(\d+)`)
-	number   = regexp.MustCompile(`^\d+$`)
+	prURL      = regexp.MustCompile(`^https://github\.com/([^/]+/[^/]+)/pull/(\d+)`)
+	issueURL   = regexp.MustCompile(`^https://github\.com/([^/]+/[^/]+)/issues/(\d+)`)
+	projectURL = regexp.MustCompile(`^https://github\.com/orgs/[^/]+/projects/\d+`)
+	number     = regexp.MustCompile(`^\d+$`)
 )
 
 // Classify inspects input and returns its kind plus parsed components.
@@ -41,10 +43,34 @@ func Classify(input string) Result {
 		n, _ := strconv.Atoi(m[2])
 		return Result{Kind: KindIssue, NWO: m[1], Number: n}
 	}
+	if projectURL.MatchString(input) {
+		if r, ok := parseProjectBoardIssue(input); ok {
+			return r
+		}
+	}
 	stripped := strings.TrimPrefix(input, "#")
 	if number.MatchString(stripped) {
 		n, _ := strconv.Atoi(stripped)
 		return Result{Kind: KindNumber, Number: n}
 	}
 	return Result{Kind: KindText, Text: input}
+}
+
+// parseProjectBoardIssue parses the `issue` query param — encoded as "org|repo|number".
+func parseProjectBoardIssue(input string) (Result, bool) {
+	u, _ := url.Parse(input)
+	raw := u.Query().Get("issue")
+	if raw == "" {
+		return Result{}, false
+	}
+	parts := strings.Split(raw, "|")
+	if len(parts) != 3 {
+		return Result{}, false
+	}
+	org, repo, numStr := parts[0], parts[1], parts[2]
+	n, err := strconv.Atoi(numStr)
+	if err != nil || n <= 0 {
+		return Result{}, false
+	}
+	return Result{Kind: KindIssue, NWO: org + "/" + repo, Number: n}, true
 }

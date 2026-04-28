@@ -38,6 +38,7 @@ wtree                             Interactive picker (cd/remove worktrees)
 wtree add <input>                 Smart-add worktree from any input:
   PR URL                            https://github.com/owner/repo/pull/123
   Issue URL                         https://github.com/owner/repo/issues/45
+  Project board URL                 https://github.com/orgs/Org/projects/1/...?issue=Org|repo|45
   Issue/PR number                   42 or #42
   Branch name                       feature/foo or pierce/my-branch
   New name                          my-feature (creates new branch)
