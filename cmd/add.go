@@ -94,6 +94,7 @@ func runAdd(ctx context.Context, input string) error {
 		fmt.Fprintln(os.Stderr, "Cancelled.")
 		return nil
 	}
+	fmt.Fprintln(os.Stderr, "Creating worktree...")
 
 	if err := gitwt.EnsureGitignore(repoRoot); err != nil {
 		return err

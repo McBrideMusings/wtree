@@ -85,6 +85,8 @@ func runRemove(ctx context.Context, target string, force bool) error {
 
 // doRemove is the shared remove flow used by `rm` and the picker.
 func doRemove(ctx context.Context, repoRoot, target string, force bool) error {
+	fmt.Fprintf(os.Stderr, "Removing worktree: %s\n", target)
+
 	list, _ := gitwt.List(ctx)
 	branch := ""
 	if w, ok := gitwt.FindByPath(list, target); ok && !w.Detached {
@@ -96,8 +98,6 @@ func doRemove(ctx context.Context, repoRoot, target string, force bool) error {
 		fmt.Fprintf(os.Stderr, "Changing directory to %s\n", repoRoot)
 		shim.PrintCD(repoRoot)
 	}
-
-	fmt.Fprintf(os.Stderr, "Removing worktree: %s\n", target)
 	if err := gitwt.Remove(ctx, target, force); err != nil {
 		if force {
 			return err
