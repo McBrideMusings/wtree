@@ -23,6 +23,7 @@ const (
 	ActionEnter
 	ActionRemove
 	ActionEditConfig
+	ActionEditGlobalConfig
 )
 
 type Selection struct {
@@ -165,6 +166,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.action = ActionEditConfig
 			m.finished = true
 			return m, tea.Quit
+		case "g":
+			m.action = ActionEditGlobalConfig
+			m.finished = true
+			return m, tea.Quit
 		}
 	}
 	return m, nil
@@ -232,7 +237,7 @@ func (m model) View() string {
 		b.WriteString("\n")
 	}
 
-	footer := fmt.Sprintf("  ↑/↓ or j/k navigate · enter: %s · x: remove · e: edit config · q/esc: quit", m.defAction)
+	footer := fmt.Sprintf("  ↑/↓ or j/k navigate · enter: %s · x: remove · e: local config · g: global config · q/esc: quit", m.defAction)
 	b.WriteString(styleFooter.Render(footer))
 	return b.String()
 }

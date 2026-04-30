@@ -44,35 +44,12 @@ func runPicker(ctx context.Context) error {
 		return doRemove(ctx, repoRoot, sel.Worktree.Path, false)
 	case picker.ActionEditConfig:
 		return openConfig(ctx, repoRoot)
+	case picker.ActionEditGlobalConfig:
+		return openGlobalConfig(ctx)
 	default:
 		fmt.Fprintln(os.Stderr, "Cancelled.")
 	}
 	return nil
-}
-
-func openConfig(ctx context.Context, repoRoot string) error {
-	configPath := filepath.Join(repoRoot, ".wtree", "config.toml")
-	_, statErr := os.Stat(configPath)
-	if os.IsNotExist(statErr) {
-		if err := config.WriteDefault(configPath); err != nil {
-			return err
-		}
-	} else if statErr != nil {
-		return statErr
-	}
-	editor := os.Getenv("EDITOR")
-	if editor == "" {
-		editor = os.Getenv("VISUAL")
-	}
-	if editor == "" {
-		fmt.Fprintln(os.Stderr, "Set $EDITOR or $VISUAL to edit the config.")
-		return nil
-	}
-	cmd := exec.CommandContext(ctx, editor, configPath)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
 }
 
 func runRemoveViaPicker(ctx context.Context) error {
@@ -102,10 +79,52 @@ func runRemoveViaPicker(ctx context.Context) error {
 		return doRemove(ctx, repoRoot, sel.Worktree.Path, false)
 	case picker.ActionEditConfig:
 		return openConfig(ctx, repoRoot)
+	case picker.ActionEditGlobalConfig:
+		return openGlobalConfig(ctx)
 	default:
 		fmt.Fprintln(os.Stderr, "Cancelled.")
 	}
 	return nil
+}
+
+func openConfig(ctx context.Context, repoRoot string) error {
+	return openConfigPath(ctx, filepath.Join(repoRoot, ".wtree", "config.toml"))
+}
+
+func openGlobalConfig(ctx context.Context) error {
+	path, err := config.GlobalConfigPath()
+	if err != nil {
+		return err
+	}
+	return openConfigPath(ctx, path)
+}
+
+func openConfigPath(ctx context.Context, path string) error {
+	if _, err := os.Stat(path); err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		if err := config.WriteDefault(path); err != nil {
+			return err
+		}
+	}
+	return launchEditor(ctx, path)
+}
+
+func launchEditor(ctx context.Context, path string) error {
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = os.Getenv("VISUAL")
+	}
+	if editor == "" {
+		fmt.Fprintln(os.Stderr, "Set $EDITOR or $VISUAL to edit the config.")
+		return nil
+	}
+	cmd := exec.CommandContext(ctx, editor, path)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 func filterNonMain(list []gitwt.Worktree, repoRoot string) []gitwt.Worktree {
