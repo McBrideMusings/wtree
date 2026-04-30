@@ -6,7 +6,7 @@ import (
 	"io"
 	"os"
 	"strings"
-	"time"
+	"syscall"
 
 	"golang.org/x/term"
 )
@@ -26,10 +26,11 @@ func confirm(prompt string) bool {
 				fmt.Fprintln(os.Stderr)
 				return false
 			}
-			os.Stdin.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+			fd := int(os.Stdin.Fd())
+			syscall.SetNonblock(fd, true)
+			defer syscall.SetNonblock(fd, false)
 			drain := make([]byte, 16)
 			os.Stdin.Read(drain)
-			os.Stdin.SetReadDeadline(time.Time{})
 			fmt.Fprintln(os.Stderr)
 			return b[0] == 'y' || b[0] == 'Y' || b[0] == '\r'
 		}
