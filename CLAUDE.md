@@ -12,7 +12,8 @@ internal/
   classify/            # input classifier (PR URL / issue URL / number / text)
   slug/                # sanitize / issue-slug compaction (the only unit-tested piece)
   gh/                  # gh CLI wrapper for PR + issue lookups
-  setup/               # post-create steps (.env*, .claude/settings.local.json, dep install)
+  config/              # .wtree/config.toml loader (copy patterns, falls back to defaults)
+  setup/               # post-create steps (copy configs per pattern list, dep install)
   picker/              # Bubble Tea TUI picker
   shim/                # CD sentinel emitter (__WTREE_CD__:<path>)
 README.md
@@ -26,7 +27,8 @@ LICENSE
 - **Worktrees go in `.worktrees/`** — created at the repo root of whatever project you're in, auto-added to `.gitignore`.
 - **Branch prefix logic** — branches are prefixed with `pierce/` for repos not owned by McBrideMusings (see `gitwt.IsOwnRepo`). Repos without an origin remote are treated as own repos for now.
 - **Smart `add` with auto-detection** — `wtree add <input>` classifies input as: GitHub PR URL, Issue URL, bare number (`#N` or `N`), or plain text (branch name). PR inputs check out the head branch; issue inputs construct a compacted `<num>-<slug>` from the title; numbers query GitHub to detect PR vs issue; plain text checks for existing branches before creating new ones. All paths confirm before creating.
-- **Interactive picker** — `wtree` with no args opens a Bubble Tea picker to cd into or remove worktrees. `wtree rm` reuses the same picker when invoked from the main repo with no target. The picker filters out the main worktree.
+- **Interactive picker** — `wtree` with no args opens a Bubble Tea picker to cd into or remove worktrees. `wtree rm` reuses the same picker when invoked from the main repo with no target. The picker filters out the main worktree. Press `e` to open `.wtree/config.toml` in `$EDITOR`/`$VISUAL` (creates the file with defaults if absent).
+- **Configurable copy patterns** — `.wtree/config.toml` at the repo root controls which files are copied into new worktrees. Defaults: `.env*`, `.dev.vars`, `.claude/settings.local.json`. Absence of the file is equivalent to using the defaults; an empty `patterns = []` disables all copying.
 - **Repo validation** — GitHub URLs are validated against the current repo's origin; mismatches show both repo names.
 - **Tab completion** — cobra generates completion scripts; run `wtree completion zsh > _wtree` and place on your fpath if desired.
 

@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 
+	"github.com/McBrideMusings/wtree/internal/config"
 	"github.com/McBrideMusings/wtree/internal/gitwt"
 	"github.com/McBrideMusings/wtree/internal/picker"
 	"github.com/McBrideMusings/wtree/internal/shim"
@@ -39,10 +42,37 @@ func runPicker(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr, "Now in: %s\n", sel.Worktree.Path)
 	case picker.ActionRemove:
 		return doRemove(ctx, repoRoot, sel.Worktree.Path, false)
+	case picker.ActionEditConfig:
+		return openConfig(ctx, repoRoot)
 	default:
 		fmt.Fprintln(os.Stderr, "Cancelled.")
 	}
 	return nil
+}
+
+func openConfig(ctx context.Context, repoRoot string) error {
+	configPath := filepath.Join(repoRoot, ".wtree", "config.toml")
+	_, statErr := os.Stat(configPath)
+	if os.IsNotExist(statErr) {
+		if err := config.WriteDefault(configPath); err != nil {
+			return err
+		}
+	} else if statErr != nil {
+		return statErr
+	}
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = os.Getenv("VISUAL")
+	}
+	if editor == "" {
+		fmt.Fprintln(os.Stderr, "Set $EDITOR or $VISUAL to edit the config.")
+		return nil
+	}
+	cmd := exec.CommandContext(ctx, editor, configPath)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 func runRemoveViaPicker(ctx context.Context) error {
@@ -67,11 +97,15 @@ func runRemoveViaPicker(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if sel.Action == picker.ActionNone {
+	switch sel.Action {
+	case picker.ActionRemove, picker.ActionEnter:
+		return doRemove(ctx, repoRoot, sel.Worktree.Path, false)
+	case picker.ActionEditConfig:
+		return openConfig(ctx, repoRoot)
+	default:
 		fmt.Fprintln(os.Stderr, "Cancelled.")
-		return nil
 	}
-	return doRemove(ctx, repoRoot, sel.Worktree.Path, false)
+	return nil
 }
 
 func filterNonMain(list []gitwt.Worktree, repoRoot string) []gitwt.Worktree {

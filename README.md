@@ -52,7 +52,7 @@ wtree help                        Show help
 ## Behavior
 
 - Worktrees are created under `.worktrees/` at the repo root (auto-added to `.gitignore`)
-- `.env*` files and `.claude/settings.local.json` are copied into new worktrees
+- `.env*`, `.dev.vars`, and `.claude/settings.local.json` are copied into new worktrees by default; customize by adding a `.wtree/config.toml` (press `e` in the picker to open it)
 - Dependencies are auto-installed in every directory with a lockfile (bun, npm, yarn, or pnpm), so subprojects in a monorepo get set up too — `node_modules`, `.git`, `.worktrees`, and common build/cache dirs are skipped during the scan
 - Branches are prefixed with `pierce/` for repos not owned by McBrideMusings
 - Issue-derived branch/worktree slugs are compacted by default to keep names shorter while preserving the issue number

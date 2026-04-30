@@ -5,10 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/McBrideMusings/wtree/internal/gitwt"
 	"github.com/McBrideMusings/wtree/internal/shim"
@@ -87,12 +85,6 @@ func runRemove(ctx context.Context, target string, force bool) error {
 func doRemove(ctx context.Context, repoRoot, target string, force bool) error {
 	fmt.Fprintf(os.Stderr, "Removing worktree: %s\n", target)
 
-	list, _ := gitwt.List(ctx)
-	branch := ""
-	if w, ok := gitwt.FindByPath(list, target); ok && !w.Detached {
-		branch = w.Branch
-	}
-
 	cwd, _ := os.Getwd()
 	if cwd == target || strings.HasPrefix(cwd, target+string(os.PathSeparator)) {
 		fmt.Fprintf(os.Stderr, "Changing directory to %s\n", repoRoot)
@@ -111,43 +103,9 @@ func doRemove(ctx context.Context, repoRoot, target string, force bool) error {
 		}
 	}
 	fmt.Fprintln(os.Stderr, "Done.")
-
-	if branch != "" && gitwt.BranchExistsLocal(ctx, branch) {
-		prNote := mergedPRNote(ctx, branch)
-		prompt := fmt.Sprintf("Also delete branch %q%s? (enter/y: yes · esc/n: skip) ", branch, prNote)
-		if confirm(prompt) {
-			if err := gitwt.DeleteBranch(ctx, branch); err == nil {
-				fmt.Fprintf(os.Stderr, "Deleted branch %q.\n", branch)
-			} else if confirm("Branch not merged locally. Force-delete anyway? (enter/y: yes · esc/n: skip) ") {
-				if err := gitwt.ForceDeleteBranch(ctx, branch); err == nil {
-					fmt.Fprintf(os.Stderr, "Force-deleted branch %q.\n", branch)
-				}
-			}
-		}
-	}
 	return nil
 }
 
 func topLevel(ctx context.Context) (string, error) {
 	return gitwt.TopLevel(ctx)
-}
-
-func mergedPRNote(ctx context.Context, branch string) string {
-	if _, err := exec.LookPath("gh"); err != nil {
-		return ""
-	}
-	tctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(tctx, "gh", "pr", "list",
-		"--head", branch, "--state", "merged",
-		"--json", "number", "--jq", ".[0].number")
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	num := strings.TrimSpace(string(out))
-	if num == "" {
-		return ""
-	}
-	return fmt.Sprintf(" (merged via PR #%s)", num)
 }

@@ -7,36 +7,39 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/McBrideMusings/wtree/internal/config"
 )
 
-// CopyConfigs mirrors the bash script's behavior: copy every .env* file at
-// the repo root into the new worktree, plus .claude/settings.local.json if
-// it exists. Failures on individual files are reported to stderr but don't
-// abort the rest.
+// CopyConfigs copies files matching the patterns in .wtree/config.toml (or
+// the built-in defaults) from the repo root into the new worktree.
 func CopyConfigs(repoRoot, worktreePath string) error {
-	matches, err := filepath.Glob(filepath.Join(repoRoot, ".env*"))
+	cfg, err := config.Load(repoRoot)
 	if err != nil {
 		return err
 	}
-	for _, src := range matches {
-		info, err := os.Stat(src)
-		if err != nil || info.IsDir() {
+	for _, pattern := range cfg.Copy.Patterns {
+		matches, err := filepath.Glob(filepath.Join(repoRoot, pattern))
+		if err != nil {
 			continue
 		}
-		dst := filepath.Join(worktreePath, filepath.Base(src))
-		if err := copyFile(src, dst); err != nil {
-			fmt.Fprintf(os.Stderr, "  (failed to copy %s: %v)\n", filepath.Base(src), err)
-		}
-	}
-
-	claudeSrc := filepath.Join(repoRoot, ".claude", "settings.local.json")
-	if _, err := os.Stat(claudeSrc); err == nil {
-		claudeDst := filepath.Join(worktreePath, ".claude")
-		if err := os.MkdirAll(claudeDst, 0o755); err != nil {
-			return err
-		}
-		if err := copyFile(claudeSrc, filepath.Join(claudeDst, "settings.local.json")); err != nil {
-			fmt.Fprintf(os.Stderr, "  (failed to copy .claude/settings.local.json: %v)\n", err)
+		for _, src := range matches {
+			info, err := os.Stat(src)
+			if err != nil || info.IsDir() {
+				continue
+			}
+			rel, err := filepath.Rel(repoRoot, src)
+			if err != nil {
+				continue
+			}
+			dst := filepath.Join(worktreePath, rel)
+			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+				fmt.Fprintf(os.Stderr, "  (failed to create dir for %s: %v)\n", rel, err)
+				continue
+			}
+			if err := copyFile(src, dst); err != nil {
+				fmt.Fprintf(os.Stderr, "  (failed to copy %s: %v)\n", rel, err)
+			}
 		}
 	}
 	return nil
