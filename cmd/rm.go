@@ -50,7 +50,7 @@ func runRemove(ctx context.Context, target string, force bool) error {
 			return err
 		}
 		if inside {
-			top, err := topLevel(ctx)
+			top, err := gitwt.TopLevel(ctx)
 			if err != nil {
 				return err
 			}
@@ -106,6 +106,35 @@ func doRemove(ctx context.Context, repoRoot, target string, force bool) error {
 	return nil
 }
 
-func topLevel(ctx context.Context) (string, error) {
-	return gitwt.TopLevel(ctx)
+func doRemoveBatch(ctx context.Context, repoRoot string, worktrees []gitwt.Worktree) error {
+	cwd, _ := os.Getwd()
+	needsCD := false
+	for _, w := range worktrees {
+		if cwd == w.Path || strings.HasPrefix(cwd, w.Path+string(os.PathSeparator)) {
+			needsCD = true
+			break
+		}
+	}
+	var errs []string
+	removed := 0
+	for _, w := range worktrees {
+		name := filepath.Base(w.Path)
+		fmt.Fprintf(os.Stderr, "Removing %s ...\n", name)
+		if err := gitwt.Remove(ctx, w.Path, false); err != nil {
+			if err2 := gitwt.Remove(ctx, w.Path, true); err2 != nil {
+				errs = append(errs, fmt.Sprintf("%s: %v", name, err2))
+				continue
+			}
+		}
+		fmt.Fprintf(os.Stderr, "  done\n")
+		removed++
+	}
+	if needsCD && removed > 0 {
+		fmt.Fprintf(os.Stderr, "Changing directory to %s\n", repoRoot)
+		shim.PrintCD(repoRoot)
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("some removals failed:\n  %s", strings.Join(errs, "\n  "))
+	}
+	return nil
 }

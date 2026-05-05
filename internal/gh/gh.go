@@ -9,6 +9,34 @@ import (
 	"strings"
 )
 
+// PRInfo holds the number and state of a pull request.
+type PRInfo struct {
+	Number int
+	State  string // "OPEN", "MERGED", "CLOSED"
+}
+
+// PRForBranch returns the most recent PR (any state) whose head branch matches.
+// Returns PRInfo{}, false, nil when no matching PR exists.
+func PRForBranch(ctx context.Context, branch string) (PRInfo, bool, error) {
+	out, err := run(ctx, "pr", "list", "--head", branch, "--state", "all", "--limit", "1", "--json", "number,state", "-q", `.[0] | if . == null then "" else "\(.number)\t\(.state)" end`)
+	if err != nil {
+		return PRInfo{}, false, err
+	}
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return PRInfo{}, false, nil
+	}
+	parts := strings.SplitN(out, "\t", 2)
+	if len(parts) != 2 {
+		return PRInfo{}, false, fmt.Errorf("unexpected gh pr list output: %q", out)
+	}
+	num, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return PRInfo{}, false, err
+	}
+	return PRInfo{Number: num, State: parts[1]}, true, nil
+}
+
 // PR contains the head branch and title of a pull request.
 type PR struct {
 	HeadBranch string
@@ -44,9 +72,14 @@ func ViewIssue(ctx context.Context, num int) (Issue, error) {
 }
 
 func run(ctx context.Context, args ...string) (string, error) {
+	var stderr strings.Builder
 	cmd := exec.CommandContext(ctx, "gh", args...)
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return "", fmt.Errorf("%w: %s", err, msg)
+		}
 		return "", err
 	}
 	return string(out), nil

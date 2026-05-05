@@ -15,20 +15,9 @@ import (
 )
 
 func runPicker(ctx context.Context) error {
-	repoRoot, err := gitwt.RepoRoot(ctx)
-	if err != nil {
-		return errors.New("not inside a git repository")
-	}
-	list, err := gitwt.List(ctx)
-	if err != nil {
+	repoRoot, filtered, current, err := loadPickerState(ctx, "No worktrees. Use `wtree add <input>` to create one.")
+	if err != nil || filtered == nil {
 		return err
-	}
-	current, _ := gitwt.TopLevel(ctx)
-
-	filtered := filterNonMain(list, repoRoot)
-	if len(filtered) == 0 {
-		fmt.Fprintln(os.Stderr, "No worktrees. Use `wtree add <input>` to create one.")
-		return nil
 	}
 
 	prompt := "Worktrees (↑/↓ navigate · enter: cd · x: remove · q: quit):"
@@ -40,33 +29,25 @@ func runPicker(ctx context.Context) error {
 	case picker.ActionEnter:
 		shim.PrintCD(sel.Worktree.Path)
 		fmt.Fprintf(os.Stderr, "Now in: %s\n", sel.Worktree.Path)
+		return nil
 	case picker.ActionRemove:
 		return doRemove(ctx, repoRoot, sel.Worktree.Path, false)
+	case picker.ActionRemoveMerged:
+		return doRemoveBatch(ctx, repoRoot, sel.Worktrees)
 	case picker.ActionEditConfig:
 		return openConfig(ctx, repoRoot)
 	case picker.ActionEditGlobalConfig:
 		return openGlobalConfig(ctx)
 	default:
 		fmt.Fprintln(os.Stderr, "Cancelled.")
+		return nil
 	}
-	return nil
 }
 
 func runRemoveViaPicker(ctx context.Context) error {
-	repoRoot, err := gitwt.RepoRoot(ctx)
-	if err != nil {
-		return errors.New("not inside a git repository")
-	}
-	list, err := gitwt.List(ctx)
-	if err != nil {
+	repoRoot, filtered, current, err := loadPickerState(ctx, "No worktrees to remove.")
+	if err != nil || filtered == nil {
 		return err
-	}
-	current, _ := gitwt.TopLevel(ctx)
-
-	filtered := filterNonMain(list, repoRoot)
-	if len(filtered) == 0 {
-		fmt.Fprintln(os.Stderr, "No worktrees to remove.")
-		return nil
 	}
 
 	prompt := "Select worktree to remove (↑/↓ navigate · enter: remove · q: quit):"
@@ -83,8 +64,29 @@ func runRemoveViaPicker(ctx context.Context) error {
 		return openGlobalConfig(ctx)
 	default:
 		fmt.Fprintln(os.Stderr, "Cancelled.")
+		return nil
 	}
-	return nil
+}
+
+// loadPickerState gathers the data both picker entry points need. Returns a
+// nil filtered slice (with nil error) when there are no non-main worktrees,
+// after printing emptyMsg to stderr — callers should treat that as a no-op exit.
+func loadPickerState(ctx context.Context, emptyMsg string) (repoRoot string, filtered []gitwt.Worktree, current string, err error) {
+	repoRoot, err = gitwt.RepoRoot(ctx)
+	if err != nil {
+		return "", nil, "", errors.New("not inside a git repository")
+	}
+	list, err := gitwt.List(ctx)
+	if err != nil {
+		return "", nil, "", err
+	}
+	current, _ = gitwt.TopLevel(ctx)
+	filtered = filterNonMain(list, repoRoot)
+	if len(filtered) == 0 {
+		fmt.Fprintln(os.Stderr, emptyMsg)
+		return "", nil, "", nil
+	}
+	return repoRoot, filtered, current, nil
 }
 
 func openConfig(ctx context.Context, repoRoot string) error {
