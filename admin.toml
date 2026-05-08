@@ -1,0 +1,69 @@
+project_name = "Wtree"
+python_min   = "3.11"
+generator_commit = "09802586e7a6610790e50f8db6d5853c15f76f6e"
+archetypes = ["go-cli"]
+
+[commands.build]
+desc = "Compile binary to bin/wtree"
+steps = ["build"]
+group = 1
+priority = 10
+
+[commands.dev]
+desc = "Install binary to ~/go/bin (daily dev workflow)"
+steps = ["install"]
+group = 1
+priority = 20
+
+[commands.deploy]
+desc = "Install binaries into GOBIN"
+group = 1
+priority = 30
+
+[commands.test]
+desc = "Run all tests"
+steps = ["test"]
+group = 2
+priority = 10
+
+[commands.vet]
+desc = "Run go vet"
+steps = ["vet"]
+group = 2
+priority = 20
+
+[commands.fmt]
+desc = "Format source files"
+steps = ["fmt"]
+group = 2
+priority = 30
+
+[commands.clean]
+desc = "Remove build artifacts"
+steps = ["clean"]
+group = 2
+priority = 40
+
+[actions.build]
+kind = "shell"
+run = "go build -o bin/wtree ."
+
+[actions.install]
+kind = "shell"
+run = "go install ."
+
+[actions.test]
+kind = "shell"
+run = "go test ./..."
+
+[actions.vet]
+kind = "shell"
+run = "go vet ./..."
+
+[actions.fmt]
+kind = "shell"
+run = "gofmt -w ."
+
+[actions.clean]
+kind = "shell"
+run = "rm -rf bin/"
