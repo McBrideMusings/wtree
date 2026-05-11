@@ -130,6 +130,9 @@ func doRemoveBatch(ctx context.Context, repoRoot string, worktrees []gitwt.Workt
 				continue
 			}
 		}
+		if err := setup.DeregisterClaudePlugins(w.Path); err != nil {
+			fmt.Fprintf(os.Stderr, "  (claude-plugins warning: %v)\n", err)
+		}
 		fmt.Fprintf(os.Stderr, "  done\n")
 		removed++
 	}

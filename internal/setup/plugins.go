@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 type pluginRegistry struct {
@@ -30,6 +31,29 @@ func claudePluginsFile() (string, error) {
 	return filepath.Join(home, ".claude", "plugins", "installed_plugins.json"), nil
 }
 
+func writeRegistry(path string, reg *pluginRegistry) error {
+	out, err := json.MarshalIndent(reg, "", "  ")
+	if err != nil {
+		return err
+	}
+	out = append(out, '\n')
+	tmp, err := os.CreateTemp(filepath.Dir(path), "installed_plugins_*.json")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(out); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
 // RegisterClaudePlugins copies any local-scoped plugin entries for repoRoot
 // into entries for worktreePath in ~/.claude/plugins/installed_plugins.json.
 func RegisterClaudePlugins(repoRoot, worktreePath string) error {
@@ -49,6 +73,7 @@ func RegisterClaudePlugins(repoRoot, worktreePath string) error {
 		return err
 	}
 
+	now := time.Now().UTC().Format(time.RFC3339)
 	added := 0
 	for key, entries := range reg.Plugins {
 		existing := make(map[string]bool, len(entries))
@@ -63,6 +88,8 @@ func RegisterClaudePlugins(repoRoot, worktreePath string) error {
 			if e.Scope == "local" && e.ProjectPath == repoRoot {
 				cp := e
 				cp.ProjectPath = worktreePath
+				cp.InstalledAt = now
+				cp.LastUpdated = now
 				toAdd = append(toAdd, cp)
 			}
 		}
@@ -75,11 +102,7 @@ func RegisterClaudePlugins(repoRoot, worktreePath string) error {
 	if added == 0 {
 		return nil
 	}
-	out, err := json.MarshalIndent(reg, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(path, append(out, '\n'), 0o644); err != nil {
+	if err := writeRegistry(path, &reg); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "  Registered %d Claude plugin(s) for worktree\n", added)
@@ -107,7 +130,7 @@ func DeregisterClaudePlugins(worktreePath string) error {
 
 	removed := 0
 	for key, entries := range reg.Plugins {
-		var kept []pluginInstall
+		kept := []pluginInstall{}
 		for _, e := range entries {
 			if e.ProjectPath == worktreePath {
 				removed++
@@ -121,11 +144,7 @@ func DeregisterClaudePlugins(worktreePath string) error {
 	if removed == 0 {
 		return nil
 	}
-	out, err := json.MarshalIndent(reg, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(path, append(out, '\n'), 0o644); err != nil {
+	if err := writeRegistry(path, &reg); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "  Removed %d Claude plugin entry/entries for worktree\n", removed)
