@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/McBrideMusings/wtree/internal/gitwt"
+	"github.com/McBrideMusings/wtree/internal/setup"
 	"github.com/McBrideMusings/wtree/internal/shim"
 	"github.com/spf13/cobra"
 )
@@ -101,6 +102,9 @@ func doRemove(ctx context.Context, repoRoot, target string, force bool) error {
 		if err := gitwt.Remove(ctx, target, true); err != nil {
 			return err
 		}
+	}
+	if err := setup.DeregisterClaudePlugins(target); err != nil {
+		fmt.Fprintf(os.Stderr, "  (claude-plugins warning: %v)\n", err)
 	}
 	fmt.Fprintln(os.Stderr, "Done.")
 	return nil
