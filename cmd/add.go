@@ -133,6 +133,9 @@ func runAdd(ctx context.Context, input string) error {
 	if err := setup.InstallDeps(worktreePath); err != nil {
 		fmt.Fprintf(os.Stderr, "  (install-deps warning: %v)\n", err)
 	}
+	if err := setup.RegisterClaudePlugins(repoRoot, worktreePath); err != nil {
+		fmt.Fprintf(os.Stderr, "  (claude-plugins warning: %v)\n", err)
+	}
 
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintf(os.Stderr, "Worktree: %s\n", worktreePath)
