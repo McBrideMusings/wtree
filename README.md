@@ -44,6 +44,8 @@ wtree add <input>                 Smart-add worktree from any input:
   New name                          my-feature (creates new branch)
 wtree ls                          List all worktrees
 wtree rm [name] [--force]         Remove worktree (auto-detects if inside one)
+wtree sync [name] [--dry-run] [-y]  Re-copy configured ignored files from the primary
+                                    repo into every child worktree (or just one)
 wtree help                        Show help
 ```
 
@@ -52,7 +54,8 @@ wtree help                        Show help
 ## Behavior
 
 - Worktrees are created under `.worktrees/` at the repo root (auto-added to `.gitignore`)
-- `.env*`, `.dev.vars`, and `.claude/settings.local.json` are copied into new worktrees by default; customize by adding a `.wtree/config.toml` (press `e` in the picker to open it)
+- Files are copied into new worktrees based on patterns in `~/.config/wtree/config.toml` (global) and `.wtree/config.toml` (per-repo); press `e` in the picker to open the repo config or `g` for the global one. No built-in defaults — nothing is copied if neither file exists.
+- `wtree sync` re-runs that copy from the primary repo into existing worktrees so changes to your local-only config files propagate without recreating each worktree; it shows a per-worktree preview (new / overwrite / identical) and confirms before writing
 - Dependencies are auto-installed in every directory with a lockfile (bun, npm, yarn, or pnpm), so subprojects in a monorepo get set up too — `node_modules`, `.git`, `.worktrees`, and common build/cache dirs are skipped during the scan
 - Branches are prefixed with `pierce/` for repos not owned by McBrideMusings
 - Issue-derived branch/worktree slugs are compacted by default to keep names shorter while preserving the issue number
