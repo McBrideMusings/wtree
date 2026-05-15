@@ -26,8 +26,7 @@ func GlobalConfigPath() (string, error) {
 
 // Load reads config from the global path and the repo-local .wtree/config.toml,
 // merging their pattern lists. Global patterns form the baseline; local patterns
-// are appended (duplicates removed). Falls back to built-in defaults when neither
-// file exists.
+// are appended (duplicates removed). Returns an empty Config when neither file exists.
 func Load(repoRoot string) (*Config, error) {
 	globalPath, err := GlobalConfigPath()
 	if err != nil {
