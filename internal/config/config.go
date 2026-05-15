@@ -15,8 +15,6 @@ type CopyConfig struct {
 	Patterns []string `toml:"patterns"`
 }
 
-var defaultPatterns = []string{".env*", ".dev.vars", ".claude/settings.local.json", "admin", "admin.toml"}
-
 // GlobalConfigPath returns ~/.config/wtree/config.toml.
 func GlobalConfigPath() (string, error) {
 	home, err := os.UserHomeDir()
@@ -62,7 +60,7 @@ func loadFile(path string) (*Config, error) {
 
 func merge(global, local *Config) *Config {
 	if global == nil && local == nil {
-		return defaults()
+		return &Config{}
 	}
 	if global == nil {
 		return local
@@ -90,15 +88,11 @@ func mergePatterns(base, extra []string) []string {
 	return out
 }
 
-// WriteDefault creates a config.toml at path with the default pattern list.
+// WriteDefault creates a config.toml at path with an empty pattern list.
 func WriteDefault(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	content := "[copy]\npatterns = [\n  \".env*\",\n  \".dev.vars\",\n  \".claude/settings.local.json\",\n  \"admin\",\n  \"admin.toml\",\n]\n"
+	content := "# Patterns of files to copy into new worktrees (supports globs).\n[copy]\npatterns = []\n"
 	return os.WriteFile(path, []byte(content), 0o644)
-}
-
-func defaults() *Config {
-	return &Config{Copy: CopyConfig{Patterns: defaultPatterns}}
 }
