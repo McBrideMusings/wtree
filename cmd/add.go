@@ -126,7 +126,7 @@ func runAdd(ctx context.Context, input string) error {
 		}
 	}
 
-	if err := setup.CopyConfigs(repoRoot, worktreePath); err != nil {
+	if err := setup.SetupConfigs(repoRoot, worktreePath); err != nil {
 		fmt.Fprintf(os.Stderr, "  (copy-configs warning: %v)\n", err)
 	}
 	setup.DirenvAllow(repoRoot, worktreePath)

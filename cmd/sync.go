@@ -18,11 +18,10 @@ var (
 	syncYes    bool
 	syncCmd    = &cobra.Command{
 		Use:   "sync [name]",
-		Short: "Re-copy configured ignored files from the primary repo into worktrees",
-		Long: `sync re-copies the files matching the [copy] patterns from the primary
-repo root into every child worktree (or just the named one), so .env files,
-.claude/settings.local.json, and any other configured paths stay aligned with
-the source of truth in the primary repo.`,
+		Short: "Sync configured files from the primary repo into worktrees",
+		Long: `sync applies the [symlink] and [copy] patterns from the primary repo root
+into every child worktree (or just the named one). Symlinked entries are
+created or repaired; copied entries are written when missing or changed.`,
 		Args:              cobra.MaximumNArgs(1),
 		ValidArgsFunction: completeWorktreeNames,
 		RunE: func(c *cobra.Command, args []string) error {
@@ -42,8 +41,9 @@ func init() {
 }
 
 type syncTarget struct {
-	wt      gitwt.Worktree
-	changes []setup.Change
+	wt             gitwt.Worktree
+	changes        []setup.Change
+	symlinkChanges []setup.SymlinkChange
 }
 
 func runSync(ctx context.Context, target string, dryRun, yes bool) error {
@@ -67,13 +67,18 @@ func runSync(ctx context.Context, target string, dryRun, yes bool) error {
 	plans := make([]syncTarget, 0, len(worktrees))
 	totalWrites := 0
 	for _, w := range worktrees {
-		changes, err := setup.Plan(repoRoot, w.Path)
+		changes, schanges, err := setup.PlanAll(repoRoot, w.Path)
 		if err != nil {
 			return fmt.Errorf("plan %s: %w", filepath.Base(w.Path), err)
 		}
-		plans = append(plans, syncTarget{wt: w, changes: changes})
+		plans = append(plans, syncTarget{wt: w, changes: changes, symlinkChanges: schanges})
 		for _, c := range changes {
 			if c.Kind != setup.ChangeIdentical {
+				totalWrites++
+			}
+		}
+		for _, c := range schanges {
+			if c.Kind == setup.SymlinkNew || c.Kind == setup.SymlinkWrong {
 				totalWrites++
 			}
 		}
@@ -98,8 +103,12 @@ func runSync(ctx context.Context, target string, dryRun, yes bool) error {
 		if err != nil {
 			return err
 		}
-		if written > 0 {
-			fmt.Fprintf(os.Stderr, "%s: wrote %d file(s)\n", filepath.Base(p.wt.Path), written)
+		linked, err := setup.ApplySymlinks(p.symlinkChanges)
+		if err != nil {
+			return err
+		}
+		if written > 0 || linked > 0 {
+			fmt.Fprintf(os.Stderr, "%s: wrote %d file(s), linked %d\n", filepath.Base(p.wt.Path), written, linked)
 		}
 	}
 	fmt.Fprintln(os.Stderr, "Done.")
@@ -137,14 +146,19 @@ func printSyncPreview(plans []syncTarget) {
 	fmt.Fprintln(os.Stderr)
 	for _, p := range plans {
 		fmt.Fprintf(os.Stderr, "%s\n", filepath.Base(p.wt.Path))
-		if len(p.changes) == 0 {
-			fmt.Fprintln(os.Stderr, "  (no matching source files)")
+		if len(p.changes) == 0 && len(p.symlinkChanges) == 0 {
+			fmt.Fprintln(os.Stderr, "  (no configured patterns matched)")
 			continue
 		}
 		sorted := append([]setup.Change(nil), p.changes...)
 		sort.Slice(sorted, func(i, j int) bool { return sorted[i].Rel < sorted[j].Rel })
 		for _, c := range sorted {
 			fmt.Fprintf(os.Stderr, "  %s\n", formatChange(c))
+		}
+		ssorted := append([]setup.SymlinkChange(nil), p.symlinkChanges...)
+		sort.Slice(ssorted, func(i, j int) bool { return ssorted[i].Rel < ssorted[j].Rel })
+		for _, c := range ssorted {
+			fmt.Fprintf(os.Stderr, "  %s\n", formatSymlinkChange(c))
 		}
 	}
 	fmt.Fprintln(os.Stderr)
@@ -158,6 +172,21 @@ func formatChange(c setup.Change) string {
 		return fmt.Sprintf("~ %s  (overwrite, differs)", c.Rel)
 	case setup.ChangeIdentical:
 		return fmt.Sprintf("= %s  (identical)", c.Rel)
+	default:
+		return c.Rel
+	}
+}
+
+func formatSymlinkChange(c setup.SymlinkChange) string {
+	switch c.Kind {
+	case setup.SymlinkNew:
+		return fmt.Sprintf("L %s  (new symlink)", c.Rel)
+	case setup.SymlinkExists:
+		return fmt.Sprintf("= %s  (symlink ok)", c.Rel)
+	case setup.SymlinkWrong:
+		return fmt.Sprintf("~ %s  (wrong target, will re-link)", c.Rel)
+	case setup.SymlinkConflict:
+		return fmt.Sprintf("! %s  (conflict: real file, skip)", c.Rel)
 	default:
 		return c.Rel
 	}
