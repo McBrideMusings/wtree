@@ -39,11 +39,29 @@ func Plan(srcRoot, dstRoot string) ([]Change, error) {
 	if err != nil {
 		return nil, err
 	}
+	return planCopy(cfg, srcRoot, dstRoot)
+}
+
+// PlanAll loads config once and returns both copy and symlink plans together.
+func PlanAll(srcRoot, dstRoot string) ([]Change, []SymlinkChange, error) {
+	cfg, err := config.Load(srcRoot)
+	if err != nil {
+		return nil, nil, err
+	}
+	copies, err := planCopy(cfg, srcRoot, dstRoot)
+	if err != nil {
+		return nil, nil, err
+	}
+	symlinks, err := planSymlinks(cfg, srcRoot, dstRoot)
+	return copies, symlinks, err
+}
+
+func planCopy(cfg *config.Config, srcRoot, dstRoot string) ([]Change, error) {
 	var changes []Change
 	for _, pattern := range cfg.Copy.Patterns {
 		matches, err := filepath.Glob(filepath.Join(srcRoot, pattern))
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("bad copy pattern %q: %w", pattern, err)
 		}
 		for _, src := range matches {
 			info, err := os.Stat(src)
@@ -139,13 +157,17 @@ func Apply(changes []Change) (int, error) {
 	return written, firstErr
 }
 
-// CopyConfigs is the original add-time entry point: plan + silently apply.
-func CopyConfigs(srcRoot, dstRoot string) error {
-	changes, err := Plan(srcRoot, dstRoot)
+// SetupConfigs runs both copy and symlink plans and applies them.
+// This is the add-time entry point.
+func SetupConfigs(srcRoot, dstRoot string) error {
+	copies, symlinks, err := PlanAll(srcRoot, dstRoot)
 	if err != nil {
 		return err
 	}
-	_, err = Apply(changes)
+	if _, err := Apply(copies); err != nil {
+		return err
+	}
+	_, err = ApplySymlinks(symlinks)
 	return err
 }
 

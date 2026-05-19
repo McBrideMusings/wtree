@@ -8,10 +8,15 @@ import (
 )
 
 type Config struct {
-	Copy CopyConfig `toml:"copy"`
+	Copy    CopyConfig    `toml:"copy"`
+	Symlink SymlinkConfig `toml:"symlink"`
 }
 
 type CopyConfig struct {
+	Patterns []string `toml:"patterns"`
+}
+
+type SymlinkConfig struct {
 	Patterns []string `toml:"patterns"`
 }
 
@@ -64,11 +69,13 @@ func merge(global, local *Config) *Config {
 	if global == nil {
 		return local
 	}
-	var extra []string
-	if local != nil {
-		extra = local.Copy.Patterns
+	if local == nil {
+		return global
 	}
-	return &Config{Copy: CopyConfig{Patterns: mergePatterns(global.Copy.Patterns, extra)}}
+	return &Config{
+		Copy:    CopyConfig{Patterns: mergePatterns(global.Copy.Patterns, local.Copy.Patterns)},
+		Symlink: SymlinkConfig{Patterns: mergePatterns(global.Symlink.Patterns, local.Symlink.Patterns)},
+	}
 }
 
 func mergePatterns(base, extra []string) []string {
@@ -87,11 +94,18 @@ func mergePatterns(base, extra []string) []string {
 	return out
 }
 
-// WriteDefault creates a config.toml at path with an empty pattern list.
+// WriteDefault creates a config.toml at path with empty pattern lists for both sections.
 func WriteDefault(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	content := "# Patterns of files to copy into new worktrees (supports globs).\n[copy]\npatterns = []\n"
+	content := `# Files to symlink into new worktrees (live link back to primary).
+[symlink]
+patterns = []
+
+# Files to copy into new worktrees (independent per-worktree).
+[copy]
+patterns = []
+`
 	return os.WriteFile(path, []byte(content), 0o644)
 }
