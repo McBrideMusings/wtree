@@ -78,7 +78,7 @@ func runSync(ctx context.Context, target string, dryRun, yes bool) error {
 			}
 		}
 		for _, c := range schanges {
-			if c.Kind == setup.SymlinkNew || c.Kind == setup.SymlinkWrong {
+			if c.Kind == setup.SymlinkNew || c.Kind == setup.SymlinkWrong || c.Kind == setup.SymlinkOrphaned {
 				totalWrites++
 			}
 		}
@@ -108,7 +108,7 @@ func runSync(ctx context.Context, target string, dryRun, yes bool) error {
 			return err
 		}
 		if written > 0 || linked > 0 {
-			fmt.Fprintf(os.Stderr, "%s: wrote %d file(s), linked %d\n", filepath.Base(p.wt.Path), written, linked)
+			fmt.Fprintf(os.Stderr, "%s: wrote %d file(s), %d symlink op(s)\n", filepath.Base(p.wt.Path), written, linked)
 		}
 	}
 	fmt.Fprintln(os.Stderr, "Done.")
@@ -187,6 +187,8 @@ func formatSymlinkChange(c setup.SymlinkChange) string {
 		return fmt.Sprintf("~ %s  (wrong target, will re-link)", c.Rel)
 	case setup.SymlinkConflict:
 		return fmt.Sprintf("! %s  (conflict: real file, skip)", c.Rel)
+	case setup.SymlinkOrphaned:
+		return fmt.Sprintf("- %s  (orphaned, will remove)", c.Rel)
 	default:
 		return c.Rel
 	}

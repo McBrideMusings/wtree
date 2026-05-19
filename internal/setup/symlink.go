@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/McBrideMusings/wtree/internal/config"
 )
@@ -17,6 +18,7 @@ const (
 	SymlinkExists                       // correct symlink already in place — no-op
 	SymlinkWrong                        // symlink present but points elsewhere — re-link
 	SymlinkConflict                     // regular file/dir at dst — skip
+	SymlinkOrphaned                     // symlink points to srcRoot but pattern no longer active — remove
 )
 
 // SymlinkChange is one source→destination symlink in a PlanSymlinks result.
@@ -40,6 +42,7 @@ func PlanSymlinks(srcRoot, dstRoot string) ([]SymlinkChange, error) {
 }
 
 func planSymlinks(cfg *config.Config, srcRoot, dstRoot string) ([]SymlinkChange, error) {
+	activeRels := make(map[string]bool)
 	var changes []SymlinkChange
 	for _, pattern := range cfg.Symlink.Patterns {
 		matches, err := filepath.Glob(filepath.Join(srcRoot, pattern))
@@ -52,12 +55,56 @@ func planSymlinks(cfg *config.Config, srcRoot, dstRoot string) ([]SymlinkChange,
 				fmt.Fprintf(os.Stderr, "  (skip symlink %s: %v)\n", src, err)
 				continue
 			}
+			activeRels[rel] = true
 			dst := filepath.Join(dstRoot, rel)
 			kind := classifySymlinkDst(src, dst)
 			changes = append(changes, SymlinkChange{Rel: rel, Src: src, Dst: dst, Kind: kind})
 		}
 	}
-	return changes, nil
+	orphaned, err := findOrphaned(cfg, srcRoot, dstRoot, activeRels)
+	if err != nil {
+		return nil, err
+	}
+	return append(changes, orphaned...), nil
+}
+
+// findOrphaned scans only the parent directories implied by the active symlink
+// patterns, looking for symlinks that target srcRoot but are no longer active.
+func findOrphaned(cfg *config.Config, srcRoot, dstRoot string, activeRels map[string]bool) ([]SymlinkChange, error) {
+	prefix := srcRoot + string(filepath.Separator)
+	scanDirs := make(map[string]bool)
+	for _, pattern := range cfg.Symlink.Patterns {
+		scanDirs[filepath.Dir(pattern)] = true
+	}
+	var orphaned []SymlinkChange
+	for relDir := range scanDirs {
+		entries, err := os.ReadDir(filepath.Join(dstRoot, relDir))
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
+		}
+		for _, entry := range entries {
+			if entry.Type()&os.ModeSymlink == 0 {
+				continue
+			}
+			rel := filepath.Join(relDir, entry.Name())
+			if activeRels[rel] {
+				continue
+			}
+			dst := filepath.Join(dstRoot, rel)
+			target, err := os.Readlink(dst)
+			if err != nil {
+				continue
+			}
+			if !strings.HasPrefix(target, prefix) {
+				continue
+			}
+			orphaned = append(orphaned, SymlinkChange{Rel: rel, Src: target, Dst: dst, Kind: SymlinkOrphaned})
+		}
+	}
+	return orphaned, nil
 }
 
 func classifySymlinkDst(src, dst string) SymlinkKind {
@@ -81,17 +128,27 @@ func classifySymlinkDst(src, dst string) SymlinkKind {
 	return SymlinkWrong
 }
 
-// ApplySymlinks creates or repairs symlinks for the non-identical changes.
-// Returns the number of links created/repaired and the first error encountered.
+// ApplySymlinks creates, repairs, or removes symlinks for the non-identical changes.
+// Returns the number of symlink operations performed and the first error encountered.
 func ApplySymlinks(changes []SymlinkChange) (int, error) {
 	var firstErr error
-	created := 0
+	n := 0
 	for _, c := range changes {
 		switch c.Kind {
 		case SymlinkExists:
 			continue
 		case SymlinkConflict:
 			fmt.Fprintf(os.Stderr, "  (symlink conflict: %s is a real file, skipping)\n", c.Rel)
+			continue
+		case SymlinkOrphaned:
+			if err := os.Remove(c.Dst); err != nil {
+				fmt.Fprintf(os.Stderr, "  (failed to remove orphaned symlink %s: %v)\n", c.Rel, err)
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			n++
 			continue
 		case SymlinkWrong:
 			if err := os.Remove(c.Dst); err != nil {
@@ -117,8 +174,8 @@ func ApplySymlinks(changes []SymlinkChange) (int, error) {
 				}
 				continue
 			}
-			created++
+			n++
 		}
 	}
-	return created, firstErr
+	return n, firstErr
 }
