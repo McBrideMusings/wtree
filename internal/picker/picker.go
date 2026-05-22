@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -76,9 +77,12 @@ func Run(ctx context.Context, prompt string, defAction DefaultAction, list []git
 }
 
 type statusMsg struct {
-	index int
-	dirty bool
-	age   string
+	index           int
+	dirty           bool
+	uncommittedCount int
+	linesAdded      int
+	linesRemoved    int
+	age             string
 }
 
 type prStatusMsg struct {
@@ -107,31 +111,36 @@ type model struct {
 }
 
 type rowStatus struct {
-	loaded   bool
-	dirty    bool
-	age      string
-	prLoaded bool
-	prFound  bool
-	prNumber int
-	prState  string
+	loaded          bool
+	dirty           bool
+	uncommittedCount int
+	linesAdded      int
+	linesRemoved    int
+	age             string
+	prLoaded        bool
+	prFound         bool
+	prNumber        int
+	prState         string
 }
 
 var (
-	styleSelected  = lipgloss.NewStyle().Reverse(true)
-	styleFooter    = lipgloss.NewStyle().Faint(true)
-	styleFooterKey = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))  // cyan keys
-	styleDirty     = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))  // yellow
-	styleCurrent   = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))  // green
-	styleAge       = lipgloss.NewStyle().Faint(true)
-	styleBranch    = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))  // cyan
-	styleParens    = lipgloss.NewStyle().Faint(true)
-	styleName      = lipgloss.NewStyle().Bold(true)
-	styleArrow     = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true) // yellow bold
-	styleMerged       = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))  // magenta
-	styleOpenPR       = lipgloss.NewStyle().Foreground(lipgloss.Color("12")) // bright blue
+	styleSelected     = lipgloss.NewStyle().Reverse(true)
+	styleFooter       = lipgloss.NewStyle().Faint(true)
+	styleFooterKey    = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))           // cyan keys
+	styleDirty        = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))           // yellow
+	styleCurrent      = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))           // green
+	styleAge          = lipgloss.NewStyle().Faint(true)
+	styleBranch       = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))           // cyan
+	styleParens       = lipgloss.NewStyle().Faint(true)
+	styleName         = lipgloss.NewStyle().Bold(true)
+	styleArrow        = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true) // yellow bold
+	styleMerged       = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))            // magenta
+	styleOpenPR       = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))           // bright blue
 	styleClosedPR     = lipgloss.NewStyle().Faint(true)
 	styleConfirmTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")) // red bold
 	styleFlash        = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))            // yellow
+	styleAdded        = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))            // green
+	styleRemoved      = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))            // red
 )
 
 func newModel(ctx context.Context, prompt string, defAction DefaultAction, list []gitwt.Worktree, currentPath string) model {
@@ -171,18 +180,43 @@ func fetchPRStatus(parent context.Context, index int, branch string) tea.Cmd {
 
 func fetchStatus(parent context.Context, index int, path string) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(parent, time.Second)
+		ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 		defer cancel()
 
-		dirty := false
-		if out, err := exec.CommandContext(ctx, "git", "-C", path, "status", "--porcelain").Output(); err == nil {
-			dirty = len(strings.TrimSpace(string(out))) > 0
+		git := func(args ...string) string {
+			out, err := exec.CommandContext(ctx, "git", append([]string{"-C", path}, args...)...).Output()
+			if err != nil {
+				return ""
+			}
+			return strings.TrimSpace(string(out))
 		}
-		age := ""
-		if out, err := exec.CommandContext(ctx, "git", "-C", path, "log", "-1", "--format=%cr", "HEAD").Output(); err == nil {
-			age = strings.TrimSpace(string(out))
+
+		uncommittedCount := 0
+		if s := git("status", "--porcelain"); s != "" {
+			uncommittedCount = strings.Count(s, "\n") + 1
 		}
-		return statusMsg{index: index, dirty: dirty, age: age}
+
+		linesAdded, linesRemoved := 0, 0
+		if s := git("diff", "HEAD", "--numstat"); s != "" {
+			for _, line := range strings.Split(s, "\n") {
+				parts := strings.Fields(line)
+				if len(parts) >= 2 {
+					a, _ := strconv.Atoi(parts[0])
+					r, _ := strconv.Atoi(parts[1])
+					linesAdded += a
+					linesRemoved += r
+				}
+			}
+		}
+
+		return statusMsg{
+			index:            index,
+			dirty:            uncommittedCount > 0,
+			uncommittedCount: uncommittedCount,
+			linesAdded:       linesAdded,
+			linesRemoved:     linesRemoved,
+			age:              git("log", "-1", "--format=%cr", "HEAD"),
+		}
 	}
 }
 
@@ -196,6 +230,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			st := &m.status[msg.index]
 			st.loaded = true
 			st.dirty = msg.dirty
+			st.uncommittedCount = msg.uncommittedCount
+			st.linesAdded = msg.linesAdded
+			st.linesRemoved = msg.linesRemoved
 			st.age = msg.age
 		}
 		return m, nil
@@ -290,59 +327,150 @@ func (m model) View() string {
 		width = 80
 	}
 
-	var b strings.Builder
-	b.WriteString(m.prompt)
-	b.WriteString("\n")
+	fk := func(key, desc string) string {
+		return styleFooterKey.Render(key) + styleFooter.Render(": "+desc)
+	}
+	sep := styleFooter.Render(" · ")
+
+	if m.mode == modeConfirmRemoveMerged {
+		return m.viewConfirm(width, fk, sep)
+	}
+
+	// pass 1: collect plain-text cell values and max column widths
+	type cellData struct {
+		name       string
+		branch     string
+		isCurrent  bool
+		filesStr   string
+		addedStr   string
+		removedStr string
+		ageStr     string
+		prLoaded   bool
+		prFound    bool
+		prNumber   int
+		prState    string
+	}
+
+	cells := make([]cellData, len(m.list))
+	var maxNameW, maxBranchW, maxFilesW, maxAddedW, maxRemovedW, maxAgeW int
 
 	for i, w := range m.list {
-		var prefix string
-		if i == m.cursor {
-			prefix = "  " + styleArrow.Render("▸") + " "
-		} else {
-			prefix = "    "
+		c := &cells[i]
+		c.name = filepath.Base(w.Path)
+		c.isCurrent = w.Path == m.currentPath && m.currentPath != ""
+
+		nameW := len(c.name)
+		if c.isCurrent {
+			nameW += len(" (current)")
 		}
-		name := filepath.Base(w.Path)
-		branchLabel := w.Branch
+		maxNameW = max(maxNameW, nameW)
+
 		if w.Detached {
 			short := w.Head
 			if len(short) > 7 {
 				short = short[:7]
 			}
-			branchLabel = "detached " + short
+			c.branch = "detached " + short
+		} else {
+			c.branch = w.Branch
 		}
-		core := styleName.Render(name) + "  " + styleParens.Render("(") + styleBranch.Render(branchLabel) + styleParens.Render(")")
+		maxBranchW = max(maxBranchW, len(c.branch))
 
-		// Compose extras in priority order: current > dirty > age. Drop
-		// lower-priority ones if the row would overflow.
-		var extras []string
-		if w.Path == m.currentPath && m.currentPath != "" {
-			extras = append(extras, styleCurrent.Render(" (current)"))
-		}
 		st := m.status[i]
 		if st.loaded && st.dirty {
-			extras = append(extras, styleDirty.Render(" *"))
+			noun := "files"
+			if st.uncommittedCount == 1 {
+				noun = "file"
+			}
+			c.filesStr = fmt.Sprintf("~%d %s", st.uncommittedCount, noun)
+			maxFilesW = max(maxFilesW, len(c.filesStr))
+		}
+		if st.loaded && st.linesAdded > 0 {
+			c.addedStr = fmt.Sprintf("+%d", st.linesAdded)
+			maxAddedW = max(maxAddedW, len(c.addedStr))
+		}
+		if st.loaded && st.linesRemoved > 0 {
+			c.removedStr = fmt.Sprintf("-%d", st.linesRemoved)
+			maxRemovedW = max(maxRemovedW, len(c.removedStr))
 		}
 		if st.loaded && st.age != "" {
-			extras = append(extras, styleAge.Render(" · "+st.age))
+			c.ageStr = st.age
+			maxAgeW = max(maxAgeW, len(c.ageStr))
 		}
-		if st.prLoaded && st.prFound {
-			switch st.prState {
+		c.prLoaded = st.prLoaded
+		c.prFound = st.prFound
+		c.prNumber = st.prNumber
+		c.prState = st.prState
+	}
+
+	sp := func(n int) string {
+		if n <= 0 {
+			return ""
+		}
+		return strings.Repeat(" ", n)
+	}
+
+	// optCol renders an optional column with consistent width across rows.
+	// Returns "" when the column is unused for the whole table. When `right`
+	// is true the value is right-aligned within colW, otherwise left-aligned.
+	optCol := func(prefix string, value string, colW int, style lipgloss.Style, right bool) string {
+		if colW == 0 {
+			return ""
+		}
+		styled := ""
+		if value != "" {
+			styled = style.Render(value)
+		}
+		pad := sp(colW - len(value))
+		if right {
+			return prefix + pad + styled
+		}
+		return prefix + styled + pad
+	}
+
+	// pass 2: render each row with consistent column widths
+	var b strings.Builder
+	b.WriteString(m.prompt)
+	b.WriteString("\n")
+
+	for i, c := range cells {
+		prefix := "    "
+		if i == m.cursor {
+			prefix = "  " + styleArrow.Render("▸") + " "
+		}
+
+		// name column (left-aligned; "(current)" folds into the width)
+		nameCell := styleName.Render(c.name)
+		nameW := len(c.name)
+		if c.isCurrent {
+			nameCell += styleCurrent.Render(" (current)")
+			nameW += len(" (current)")
+		}
+		nameCell += sp(maxNameW - nameW)
+
+		// branch column "(branch)" — padding after the closing paren
+		branchCell := styleParens.Render("(") + styleBranch.Render(c.branch) + styleParens.Render(")")
+		branchCell += sp(maxBranchW - len(c.branch))
+
+		filesCell := optCol("  ", c.filesStr, maxFilesW, styleDirty, false)
+		addedCell := optCol("  ", c.addedStr, maxAddedW, styleAdded, true)
+		removedCell := optCol(" ", c.removedStr, maxRemovedW, styleRemoved, true)
+		ageCell := optCol("  ", c.ageStr, maxAgeW, styleAge, false)
+
+		// PR column (no width padding — last column)
+		var prCell string
+		if c.prLoaded && c.prFound {
+			switch c.prState {
 			case "MERGED":
-				extras = append(extras, styleMerged.Render(" · ✓ merged"))
+				prCell = "  " + styleMerged.Render("✓ merged")
 			case "OPEN":
-				extras = append(extras, styleOpenPR.Render(fmt.Sprintf(" · #%d", st.prNumber)))
+				prCell = "  " + styleOpenPR.Render(fmt.Sprintf("#%d", c.prNumber))
 			case "CLOSED":
-				extras = append(extras, styleClosedPR.Render(" · ✗ closed"))
+				prCell = "  " + styleClosedPR.Render("✗ closed")
 			}
 		}
 
-		row := prefix + core
-		for _, e := range extras {
-			if lipgloss.Width(row+e) > width {
-				break
-			}
-			row += e
-		}
+		row := prefix + nameCell + "  " + branchCell + filesCell + addedCell + removedCell + ageCell + prCell
 
 		if i == m.cursor {
 			pad := width - lipgloss.Width(row)
@@ -353,15 +481,6 @@ func (m model) View() string {
 		}
 		b.WriteString(row)
 		b.WriteString("\n")
-	}
-
-	fk := func(key, desc string) string {
-		return styleFooterKey.Render(key) + styleFooter.Render(": "+desc)
-	}
-	sep := styleFooter.Render(" · ")
-
-	if m.mode == modeConfirmRemoveMerged {
-		return m.viewConfirm(width, fk, sep)
 	}
 
 	if m.flashMsg != "" {
