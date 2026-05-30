@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/McBrideMusings/wtree/internal/classify"
+	"github.com/McBrideMusings/wtree/internal/config"
 	"github.com/McBrideMusings/wtree/internal/gh"
 	"github.com/McBrideMusings/wtree/internal/gitwt"
 	"github.com/McBrideMusings/wtree/internal/setup"
@@ -130,9 +131,23 @@ func runAdd(ctx context.Context, input string) error {
 		fmt.Fprintf(os.Stderr, "  (copy-configs warning: %v)\n", err)
 	}
 	setup.DirenvAllow(repoRoot, worktreePath)
-	if err := setup.InstallDeps(worktreePath); err != nil {
-		fmt.Fprintf(os.Stderr, "  (install-deps warning: %v)\n", err)
+
+	cfg, cerr := config.Load(repoRoot)
+	if cerr != nil {
+		fmt.Fprintf(os.Stderr, "  (config warning: %v)\n", cerr)
 	}
+	if cfg != nil && len(cfg.Commands.PostCreate) > 0 {
+		// Explicit post_create config is authoritative.
+		if err := setup.RunPostCreate(repoRoot, worktreePath, cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "  (post-create warning: %v)\n", err)
+		}
+	} else {
+		// Back-compat: no [commands] configured → legacy recursive dep install.
+		if err := setup.InstallDeps(worktreePath); err != nil {
+			fmt.Fprintf(os.Stderr, "  (install-deps warning: %v)\n", err)
+		}
+	}
+
 	if err := setup.RegisterClaudePlugins(repoRoot, worktreePath); err != nil {
 		fmt.Fprintf(os.Stderr, "  (claude-plugins warning: %v)\n", err)
 	}
