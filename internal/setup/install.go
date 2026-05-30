@@ -7,92 +7,119 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
+
+	"github.com/McBrideMusings/wtree/internal/config"
 )
 
-type lockfile struct {
-	name     string
-	tool     string
-	priority int
+// DefaultInstallRecipe reproduces wtree's historical hardcoded behavior: the
+// lockfile→tool priority table, the pruned directory set, and `<tool> install`.
+// Lockfiles are ordered high→low priority (first present in a dir wins).
+func DefaultInstallRecipe() config.InstallRecipe {
+	return config.InstallRecipe{
+		Command: "{tool} install",
+		SkipDirs: []string{
+			"node_modules", ".git", ".worktrees", ".next",
+			"dist", "build", "target", ".venv", "venv", ".turbo", ".cache",
+		},
+		Lockfiles: []config.LockfileRule{
+			{File: "bun.lockb", Tool: "bun"},
+			{File: "bun.lock", Tool: "bun"},
+			{File: "pnpm-lock.yaml", Tool: "pnpm"},
+			{File: "yarn.lock", Tool: "yarn"},
+			{File: "package-lock.json", Tool: "npm"},
+		},
+	}
 }
 
-var lockfiles = []lockfile{
-	{"bun.lockb", "bun", 4},
-	{"bun.lock", "bun", 4},
-	{"pnpm-lock.yaml", "pnpm", 3},
-	{"yarn.lock", "yarn", 2},
-	{"package-lock.json", "npm", 1},
+// installPick is one directory and the command to run in it.
+type installPick struct {
+	dir string // absolute
+	cmd string // {tool}-substituted command
 }
 
-var pruneDirs = map[string]bool{
-	"node_modules": true,
-	".git":         true,
-	".worktrees":   true,
-	".next":        true,
-	"dist":         true,
-	"build":        true,
-	"target":       true,
-	".venv":        true,
-	"venv":         true,
-	".turbo":       true,
-	".cache":       true,
-}
-
-// InstallDeps walks worktreePath, picks the highest-priority lockfile in each
-// directory, and runs `<tool> install` there. Skips entirely if
-// WTREE_SKIP_INSTALL is set.
-func InstallDeps(worktreePath string) error {
-	if os.Getenv("WTREE_SKIP_INSTALL") != "" {
-		fmt.Fprintln(os.Stderr, "Skipping dependency install (WTREE_SKIP_INSTALL set).")
-		return nil
+// planInstalls walks root and, for each directory, selects the highest-priority
+// lockfile present and resolves the command to run there. Pure (no side
+// effects) so it can be unit-tested. Directories named in the recipe's SkipDirs
+// are not descended into (the root itself is never pruned). Returns picks sorted
+// by directory for deterministic output.
+func planInstalls(root string, r config.InstallRecipe) []installPick {
+	skip := make(map[string]bool, len(r.SkipDirs))
+	for _, d := range r.SkipDirs {
+		skip[d] = true
+	}
+	// priority = position in the lockfile list (earlier = higher). Map filename
+	// to (tool, priority); lower priorityIdx wins.
+	type rule struct {
+		tool     string
+		priority int
+	}
+	byFile := make(map[string]rule, len(r.Lockfiles))
+	for i, lf := range r.Lockfiles {
+		// keep the first occurrence's priority if a file is listed twice
+		if _, ok := byFile[lf.File]; !ok {
+			byFile[lf.File] = rule{tool: lf.Tool, priority: i}
+		}
 	}
 
-	type pick struct{ dir, tool string }
-	picks := map[string]pick{} // dir -> (tool, priority)
-	priorities := map[string]int{}
+	bestTool := map[string]string{} // dir -> tool
+	bestPrio := map[string]int{}    // dir -> priorityIdx (lower = better)
 
-	err := filepath.WalkDir(worktreePath, func(path string, d fs.DirEntry, err error) error {
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
 		if d.IsDir() {
-			if pruneDirs[d.Name()] && path != worktreePath {
+			if path != root && skip[d.Name()] {
 				return fs.SkipDir
 			}
 			return nil
 		}
-		for _, lf := range lockfiles {
-			if d.Name() == lf.name {
-				dir := filepath.Dir(path)
-				if lf.priority > priorities[dir] {
-					priorities[dir] = lf.priority
-					picks[dir] = pick{dir: dir, tool: lf.tool}
-				}
+		if ru, ok := byFile[d.Name()]; ok {
+			dir := filepath.Dir(path)
+			if cur, seen := bestPrio[dir]; !seen || ru.priority < cur {
+				bestPrio[dir] = ru.priority
+				bestTool[dir] = ru.tool
 			}
 		}
 		return nil
 	})
-	if err != nil {
-		return err
-	}
-	if len(picks) == 0 {
-		return nil
-	}
 
-	dirs := make([]string, 0, len(picks))
-	for d := range picks {
-		dirs = append(dirs, d)
+	dirs := make([]string, 0, len(bestTool))
+	for dir := range bestTool {
+		dirs = append(dirs, dir)
 	}
 	sort.Strings(dirs)
 
+	template := r.Command
+	if strings.TrimSpace(template) == "" {
+		template = "{tool} install"
+	}
+	picks := make([]installPick, 0, len(dirs))
 	for _, dir := range dirs {
-		p := picks[dir]
-		rel, err := filepath.Rel(worktreePath, dir)
+		cmd := strings.ReplaceAll(template, "{tool}", bestTool[dir])
+		picks = append(picks, installPick{dir: dir, cmd: cmd})
+	}
+	return picks
+}
+
+// InstallDepsWithRecipe runs the install recipe across worktreePath. Honors
+// WTREE_SKIP_INSTALL. A failing install in one directory is reported but does
+// not stop the others.
+func InstallDepsWithRecipe(worktreePath string, r config.InstallRecipe) error {
+	if os.Getenv("WTREE_SKIP_INSTALL") != "" {
+		fmt.Fprintln(os.Stderr, "Skipping dependency install (WTREE_SKIP_INSTALL set).")
+		return nil
+	}
+	picks := planInstalls(worktreePath, r)
+	for _, p := range picks {
+		rel, err := filepath.Rel(worktreePath, p.dir)
 		if err != nil || rel == "" {
 			rel = "."
 		}
-		fmt.Fprintf(os.Stderr, "Installing dependencies with %s in %s...\n", p.tool, rel)
-		cmd := exec.Command(p.tool, "install")
-		cmd.Dir = dir
+		fmt.Fprintf(os.Stderr, "Installing dependencies (%s) in %s...\n", p.cmd, rel)
+		cmd := exec.Command("sh", "-c", p.cmd)
+		cmd.Dir = p.dir
 		cmd.Stdout = os.Stderr
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
@@ -100,4 +127,11 @@ func InstallDeps(worktreePath string) error {
 		}
 	}
 	return nil
+}
+
+// InstallDeps runs the recursive dependency install with the built-in default
+// recipe. Retained as the back-compat entry point used when a repo has no
+// [commands] configuration at all.
+func InstallDeps(worktreePath string) error {
+	return InstallDepsWithRecipe(worktreePath, DefaultInstallRecipe())
 }
