@@ -137,9 +137,11 @@ func runAdd(ctx context.Context, input string) error {
 		fmt.Fprintf(os.Stderr, "  (config warning: %v)\n", cerr)
 	}
 	if cfg != nil && len(cfg.Commands.PostCreate) > 0 {
-		// Explicit post_create config is authoritative.
+		// Explicit post_create config is authoritative. A non-nil error here
+		// means a step marked required failed — abort the add rather than
+		// cd the user into a half-provisioned worktree.
 		if err := setup.RunPostCreate(repoRoot, worktreePath, cfg); err != nil {
-			fmt.Fprintf(os.Stderr, "  (post-create warning: %v)\n", err)
+			return fmt.Errorf("post-create step failed: %w", err)
 		}
 	} else {
 		// Back-compat: no [commands] configured → legacy recursive dep install.
