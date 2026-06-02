@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -63,6 +64,37 @@ func RepoRoot(ctx context.Context) (string, error) {
 		return filepath.Dir(commonDir), nil
 	}
 	return top, nil
+}
+
+// CurrentBranchAt returns the checked-out branch name at the worktree rooted at
+// path, or "" if HEAD is detached or the lookup fails.
+func CurrentBranchAt(ctx context.Context, path string) string {
+	out, err := runGitSilent(ctx, "-C", path, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return ""
+	}
+	if b := strings.TrimSpace(out); b != "HEAD" {
+		return b
+	}
+	return ""
+}
+
+// FetchAndCountBehind fetches origin/<branch> into the repo at path, then reports
+// how many commits the local <branch> is behind origin/<branch>. A fetch or
+// rev-list failure returns an error; the caller decides how to surface it.
+func FetchAndCountBehind(ctx context.Context, path, branch string) (int, error) {
+	if branch == "" {
+		return 0, errors.New("no default branch")
+	}
+	if _, err := runGitSilent(ctx, "-C", path, "fetch", "origin", branch); err != nil {
+		return 0, err
+	}
+	out, err := runGitSilent(ctx, "-C", path, "rev-list", "--count", branch+"..origin/"+branch)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := strconv.Atoi(strings.TrimSpace(out))
+	return n, nil
 }
 
 // InsideLinkedWorktree reports whether the cwd is inside a linked worktree
