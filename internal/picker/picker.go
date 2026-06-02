@@ -27,6 +27,7 @@ const (
 	ActionEditConfig
 	ActionEditGlobalConfig
 	ActionRemoveMerged
+	ActionPull
 )
 
 type Selection struct {
@@ -51,11 +52,11 @@ const (
 
 // Run shows the picker for the worktrees passed in (callers filter the main
 // worktree out themselves) and returns what the user picked.
-func Run(ctx context.Context, prompt string, defAction DefaultAction, list []gitwt.Worktree, currentPath string) (Selection, error) {
+func Run(ctx context.Context, prompt string, defAction DefaultAction, list []gitwt.Worktree, currentPath, mainPath, defaultBranch string) (Selection, error) {
 	if len(list) == 0 {
 		return Selection{}, fmt.Errorf("no worktrees")
 	}
-	m := newModel(ctx, prompt, defAction, list, currentPath)
+	m := newModel(ctx, prompt, defAction, list, currentPath, mainPath, defaultBranch)
 	prog := tea.NewProgram(m, tea.WithContext(ctx), tea.WithOutput(os.Stderr))
 	final, err := prog.Run()
 	if err != nil {
@@ -65,6 +66,8 @@ func Run(ctx context.Context, prompt string, defAction DefaultAction, list []git
 	switch fm.action {
 	case ActionNone:
 		return Selection{}, nil
+	case ActionPull:
+		return Selection{Action: ActionPull}, nil
 	case ActionRemoveMerged:
 		wts := make([]gitwt.Worktree, len(fm.mergedToRemove))
 		for i, idx := range fm.mergedToRemove {
@@ -93,15 +96,25 @@ type prStatusMsg struct {
 	ghErr  bool // gh binary missing or auth failure
 }
 
+type behindMsg struct {
+	count int
+	err   bool
+}
+
 type model struct {
 	ctx            context.Context
 	prompt         string
 	defAction      DefaultAction
 	list           []gitwt.Worktree
 	currentPath    string
+	mainPath       string // primary worktree path; "" when no main row is shown
+	mainIndex      int    // index of the main row in list, or -1
+	defaultBranch  string // branch compared against origin for the behind check
 	cursor         int
 	width          int
 	status         []rowStatus
+	behindLoaded   bool
+	behindCount    int
 	action         Action
 	finished       bool
 	mode           viewMode
@@ -143,24 +156,51 @@ var (
 	styleRemoved      = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))            // red
 )
 
-func newModel(ctx context.Context, prompt string, defAction DefaultAction, list []gitwt.Worktree, currentPath string) model {
+func newModel(ctx context.Context, prompt string, defAction DefaultAction, list []gitwt.Worktree, currentPath, mainPath, defaultBranch string) model {
+	mainIndex := -1
+	if mainPath != "" {
+		for i, w := range list {
+			if w.Path == mainPath {
+				mainIndex = i
+				break
+			}
+		}
+	}
 	return model{
-		ctx:         ctx,
-		prompt:      prompt,
-		defAction:   defAction,
-		list:        list,
-		currentPath: currentPath,
-		status:      make([]rowStatus, len(list)),
+		ctx:           ctx,
+		prompt:        prompt,
+		defAction:     defAction,
+		list:          list,
+		currentPath:   currentPath,
+		mainPath:      mainPath,
+		mainIndex:     mainIndex,
+		defaultBranch: defaultBranch,
+		status:        make([]rowStatus, len(list)),
 	}
 }
 
 func (m model) Init() tea.Cmd {
-	cmds := make([]tea.Cmd, 0, len(m.list)*2)
+	cmds := make([]tea.Cmd, 0, len(m.list)*2+1)
 	for i, w := range m.list {
 		cmds = append(cmds, fetchStatus(m.ctx, i, w.Path))
 		cmds = append(cmds, fetchPRStatus(m.ctx, i, w.Branch))
 	}
+	if m.mainIndex >= 0 && m.defaultBranch != "" {
+		cmds = append(cmds, fetchBehind(m.ctx, m.mainPath, m.defaultBranch))
+	}
 	return tea.Batch(cmds...)
+}
+
+func fetchBehind(parent context.Context, mainPath, defaultBranch string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+		defer cancel()
+		count, err := gitwt.FetchAndCountBehind(ctx, mainPath, defaultBranch)
+		if err != nil {
+			return behindMsg{err: true}
+		}
+		return behindMsg{count: count}
+	}
 }
 
 func fetchPRStatus(parent context.Context, index int, branch string) tea.Cmd {
@@ -249,6 +289,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			st.prState = msg.state
 		}
 		return m, nil
+	case behindMsg:
+		m.behindLoaded = !msg.err
+		if !msg.err {
+			m.behindCount = msg.count
+		}
+		return m, nil
 	case tea.KeyMsg:
 		m.flashMsg = ""
 		switch m.mode {
@@ -278,6 +324,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "enter":
 				if m.defAction == DefaultRemove {
+					if m.cursor == m.mainIndex {
+						m.flashMsg = "Cannot remove the primary worktree."
+						break
+					}
 					m.action = ActionRemove
 				} else {
 					m.action = ActionEnter
@@ -285,12 +335,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.finished = true
 				return m, tea.Quit
 			case "x":
+				if m.cursor == m.mainIndex {
+					m.flashMsg = "Cannot remove the primary worktree."
+					break
+				}
 				m.action = ActionRemove
 				m.finished = true
 				return m, tea.Quit
+			case "p":
+				if m.mainIndex < 0 {
+					break
+				}
+				switch {
+				case !m.behindLoaded:
+					m.flashMsg = "Checking origin…"
+				case m.behindCount == 0:
+					m.flashMsg = fmt.Sprintf("Primary is up to date with origin/%s.", m.defaultBranch)
+				default:
+					m.action = ActionPull
+					m.finished = true
+					return m, tea.Quit
+				}
 			case "D":
 				var indices []int
 				for i, st := range m.status {
+					if i == m.mainIndex {
+						continue // never sweep the primary worktree into batch removal
+					}
 					if st.prLoaded && st.prFound && st.prState == "MERGED" {
 						indices = append(indices, i)
 					}
@@ -470,7 +541,13 @@ func (m model) View() string {
 			}
 		}
 
-		row := prefix + nameCell + "  " + branchCell + filesCell + addedCell + removedCell + ageCell + prCell
+		// behind-origin indicator (main row only, once the async fetch lands)
+		var behindCell string
+		if i == m.mainIndex && m.behindLoaded && m.behindCount > 0 {
+			behindCell = "  " + styleDirty.Render(fmt.Sprintf("↓%d behind origin/%s", m.behindCount, m.defaultBranch))
+		}
+
+		row := prefix + nameCell + "  " + branchCell + filesCell + addedCell + removedCell + ageCell + prCell + behindCell
 
 		if i == m.cursor {
 			pad := width - lipgloss.Width(row)
@@ -486,16 +563,21 @@ func (m model) View() string {
 	if m.flashMsg != "" {
 		b.WriteString(styleFlash.Render("  " + m.flashMsg))
 	} else {
-		footer := "  " + strings.Join([]string{
+		keys := []string{
 			fk("↑/↓ j/k", "navigate"),
 			fk("enter", string(m.defAction)),
 			fk("x", "remove"),
 			fk("D", "remove merged"),
+		}
+		if m.mainIndex >= 0 && m.behindLoaded && m.behindCount > 0 {
+			keys = append(keys, fk("p", "pull origin/"+m.defaultBranch))
+		}
+		keys = append(keys,
 			fk("e", "local config"),
 			fk("g", "global config"),
 			fk("q/esc", "quit"),
-		}, sep)
-		b.WriteString(footer)
+		)
+		b.WriteString("  " + strings.Join(keys, sep))
 	}
 	return b.String()
 }
