@@ -1,6 +1,6 @@
 project_name = "Wtree"
 python_min   = "3.11"
-generator_commit = "369752ed5815575e0f1b326a45424409684d788d"
+generator_commit = "df5e788f7c0e2a447bbf2f143b8c4de497af0931"
 archetypes = ["go-cli"]
 
 [commands.build]
