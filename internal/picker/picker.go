@@ -723,11 +723,18 @@ func hyperlink(url, text string) string {
 // by the spinner tick.
 func (m model) loadingBar() string {
 	const barW, fillW = 28, 8
-	pos := m.spinnerFrame % barW
+	// Bounce the filled block back and forth strictly inside the brackets so it
+	// never wraps across an edge (which made it appear to bleed past "]").
+	span := barW - fillW
+	cycle := m.spinnerFrame % (2 * span)
+	pos := cycle
+	if cycle > span {
+		pos = 2*span - cycle
+	}
 	var sb strings.Builder
 	sb.WriteString(styleParens.Render("["))
 	for k := range barW {
-		if d := (k - pos + barW) % barW; d < fillW {
+		if k >= pos && k < pos+fillW {
 			sb.WriteString(styleSpinner.Render("▰"))
 		} else {
 			sb.WriteString(styleParens.Render("▱"))
