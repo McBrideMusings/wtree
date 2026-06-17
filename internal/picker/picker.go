@@ -732,15 +732,13 @@ func (m model) loadingBar() string {
 		pos = 2*span - cycle
 	}
 	var sb strings.Builder
-	sb.WriteString(styleParens.Render("["))
 	for k := range barW {
 		if k >= pos && k < pos+fillW {
-			sb.WriteString(styleSpinner.Render("█"))
+			sb.WriteString(styleSpinner.Render("▰"))
 		} else {
-			sb.WriteString(styleParens.Render("░"))
+			sb.WriteString(styleParens.Render("▱"))
 		}
 	}
-	sb.WriteString(styleParens.Render("]"))
 	return sb.String()
 }
 
