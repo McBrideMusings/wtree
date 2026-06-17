@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -403,7 +404,13 @@ func openInBrowser(url string) tea.Cmd {
 		if url == "" {
 			return flashResultMsg{"Nothing to open for this row."}
 		}
-		_ = exec.Command("open", url).Start()
+		opener := "xdg-open"
+		if runtime.GOOS == "darwin" {
+			opener = "open"
+		}
+		if err := exec.Command(opener, url).Start(); err != nil {
+			return flashResultMsg{"Couldn't open browser: " + err.Error()}
+		}
 		return flashResultMsg{"Opened in browser."}
 	}
 }
