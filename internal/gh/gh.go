@@ -295,6 +295,7 @@ query($q: String!) {
         reviewDecision
         reviews(last: 50) { nodes { author { login } submittedAt } }
         comments(last: 50) { nodes { author { login } createdAt } }
+        commits(last: 1) { nodes { commit { committedDate } } }
       }
     }
   }
@@ -338,6 +339,13 @@ func MyOpenPRReviewStates(ctx context.Context, nwo string) (map[string]ReviewCla
 							CreatedAt string `json:"createdAt"`
 						} `json:"nodes"`
 					} `json:"comments"`
+					Commits struct {
+						Nodes []struct {
+							Commit struct {
+								CommittedDate string `json:"committedDate"`
+							} `json:"commit"`
+						} `json:"nodes"`
+					} `json:"commits"`
 				} `json:"nodes"`
 			} `json:"search"`
 		} `json:"data"`
@@ -353,29 +361,42 @@ func MyOpenPRReviewStates(ctx context.Context, nwo string) (map[string]ReviewCla
 			continue
 		}
 
-		// Find the most recent actor across reviews and comments.
-		var lastTime time.Time
-		var lastActor string
-		consider := func(login, ts string) {
-			if t, err := time.Parse(time.RFC3339, ts); err == nil && t.After(lastTime) {
-				lastTime, lastActor = t, login
+		// Split review/comment activity into the reviewer's last word vs. my own
+		// last response. A newer push (latest commit) also counts as a response.
+		var lastFeedback, lastSelf time.Time
+		note := func(login, ts string) {
+			t, err := time.Parse(time.RFC3339, ts)
+			if err != nil {
+				return
+			}
+			if strings.EqualFold(login, me) {
+				if t.After(lastSelf) {
+					lastSelf = t
+				}
+			} else if t.After(lastFeedback) {
+				lastFeedback = t
 			}
 		}
 		for _, r := range n.Reviews.Nodes {
-			consider(r.Author.Login, r.SubmittedAt)
+			note(r.Author.Login, r.SubmittedAt)
 		}
 		for _, c := range n.Comments.Nodes {
-			consider(c.Author.Login, c.CreatedAt)
+			note(c.Author.Login, c.CreatedAt)
+		}
+		if len(n.Commits.Nodes) > 0 {
+			if t, err := time.Parse(time.RFC3339, n.Commits.Nodes[0].Commit.CommittedDate); err == nil && t.After(lastSelf) {
+				lastSelf = t // a push after their feedback means I've responded
+			}
 		}
 
 		switch {
 		case n.ReviewDecision == "APPROVED":
 			states[n.HeadRefName] = ReviewApproved
-		case lastActor != "" && !strings.EqualFold(lastActor, me):
-			// A reviewer (anyone but me) acted most recently — I owe a response.
+		case !lastFeedback.IsZero() && lastFeedback.After(lastSelf):
+			// A reviewer spoke last and I haven't responded (no later comment or push).
 			states[n.HeadRefName] = ReviewChangesRequested
 		default:
-			// No feedback yet, or I responded last — nothing for me to do.
+			// No feedback yet, or I responded last (comment or commit).
 			states[n.HeadRefName] = ReviewInProgress
 		}
 	}
