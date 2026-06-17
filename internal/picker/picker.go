@@ -111,14 +111,9 @@ type issueMsg struct {
 	fromPR bool
 }
 
-type inboxListMsg struct {
+type inboxMsg struct {
 	prs   []gh.InboxPR
 	ghErr bool
-}
-
-type inboxItemMsg struct {
-	index int
-	state gh.ReviewState
 }
 
 type behindMsg struct {
@@ -148,8 +143,8 @@ type model struct {
 	behindLoaded    bool
 	behindCount     int
 	inbox           []gh.InboxPR
-	inboxListLoaded bool
-	inboxListErr    bool
+	inboxLoaded     bool
+	inboxErr        bool
 	spinnerFrame    int
 	action          Action
 	addPRNumber     int
@@ -248,7 +243,7 @@ func (m model) Init() tea.Cmd {
 				branches = append(branches, w.Branch)
 			}
 		}
-		cmds = append(cmds, fetchInboxList(m.ctx, branches), spinnerTick())
+		cmds = append(cmds, fetchInbox(m.ctx, m.nwo, branches), spinnerTick())
 	}
 	return tea.Batch(cmds...)
 }
@@ -315,27 +310,15 @@ func fetchHeuristicIssue(parent context.Context, index int, branch string) tea.C
 	}
 }
 
-func fetchInboxList(parent context.Context, localBranches []string) tea.Cmd {
+func fetchInbox(parent context.Context, nwo string, localBranches []string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 		defer cancel()
-		prs, err := gh.ReviewCandidates(ctx, localBranches)
+		prs, err := gh.ReviewInbox(ctx, nwo, localBranches)
 		if err != nil {
-			return inboxListMsg{ghErr: true}
+			return inboxMsg{ghErr: true}
 		}
-		return inboxListMsg{prs: prs}
-	}
-}
-
-func fetchInboxItem(parent context.Context, index, prNumber int) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(parent, 15*time.Second)
-		defer cancel()
-		state, err := gh.ClassifyReview(ctx, prNumber)
-		if err != nil {
-			return inboxItemMsg{index: index, state: gh.ReviewedCurrent} // drop on error
-		}
-		return inboxItemMsg{index: index, state: state}
+		return inboxMsg{prs: prs}
 	}
 }
 
@@ -455,22 +438,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
-	case inboxListMsg:
-		m.inboxListLoaded = true
-		m.inboxListErr = msg.ghErr
+	case inboxMsg:
+		m.inboxLoaded = true
+		m.inboxErr = msg.ghErr
 		m.inbox = msg.prs
-		if len(m.inbox) == 0 {
-			return m, nil
-		}
-		cmds := make([]tea.Cmd, len(m.inbox))
-		for j := range m.inbox {
-			cmds[j] = fetchInboxItem(m.ctx, j, m.inbox[j].Number)
-		}
-		return m, tea.Batch(cmds...)
-	case inboxItemMsg:
-		if msg.index >= 0 && msg.index < len(m.inbox) {
-			m.inbox[msg.index].State = msg.state
-		}
 		return m, nil
 	case behindMsg:
 		m.behindLoaded = !msg.err
@@ -649,19 +620,6 @@ func (m model) worktreesReady() bool {
 	return true
 }
 
-func reviewKept(s gh.ReviewState) bool {
-	return s == gh.NotReviewed || s == gh.UpdatedSinceReview
-}
-
-func (m model) inboxPending() bool {
-	for _, pr := range m.inbox {
-		if pr.State == gh.ReviewPending {
-			return true
-		}
-	}
-	return false
-}
-
 // loading reports whether anything is still resolving (drives the spinner ticks).
 func (m model) loading() bool {
 	if !m.worktreesReady() {
@@ -670,10 +628,7 @@ func (m model) loading() bool {
 	if !m.dashboard {
 		return false
 	}
-	if !m.inboxListLoaded {
-		return true
-	}
-	return m.inboxPending()
+	return !m.inboxLoaded
 }
 
 // buckets groups worktree indices by status (0..4: primary, in-review,
@@ -726,9 +681,7 @@ func (m model) selectableItems() []selItem {
 		}
 	}
 	for j := range m.inbox {
-		if reviewKept(m.inbox[j].State) {
-			items = append(items, selItem{isInbox: true, idx: j})
-		}
+		items = append(items, selItem{isInbox: true, idx: j})
 	}
 	return items
 }
@@ -1096,35 +1049,29 @@ func (m model) worktreeBody(c cells, i int) string {
 }
 
 // writeInbox renders the NEEDS MY REVIEW section. By the time the dashboard
-// renders, the inbox is fully loaded and classified (the loading bar gates on
-// that), so there is no streaming or reserved space to manage here.
+// renders, the inbox is fully loaded (the loading bar gates on that) and
+// ReviewInbox has already dropped reviewed-current PRs, so every entry is shown.
 func (m model) writeInbox(b *strings.Builder, width int, isCursor func(selItem) bool) {
-	if m.inboxListErr {
+	if m.inboxErr {
 		b.WriteString("\n")
 		b.WriteString(styleFooter.Render("  (review inbox unavailable — gh not found or not authenticated)") + "\n")
 		return
 	}
-
-	maxNumW, maxAuthorW, keptCount := 0, 0, 0
-	for _, pr := range m.inbox {
-		if reviewKept(pr.State) {
-			keptCount++
-			maxNumW = max(maxNumW, len(fmt.Sprintf("#%d", pr.Number)))
-			maxAuthorW = max(maxAuthorW, len(pr.Author))
-		}
-	}
-	if keptCount == 0 {
+	if len(m.inbox) == 0 {
 		return // nothing to review — collapse the section entirely
+	}
+
+	maxNumW, maxAuthorW := 0, 0
+	for _, pr := range m.inbox {
+		maxNumW = max(maxNumW, len(fmt.Sprintf("#%d", pr.Number)))
+		maxAuthorW = max(maxAuthorW, len(pr.Author))
 	}
 
 	rule := strings.Repeat("─", min(width-2, 74))
 	b.WriteString(styleFooter.Render("  "+rule) + "\n") // rule hugs the section above it
-	b.WriteString(styleSection.Render(fmt.Sprintf("  NEEDS MY REVIEW · %d", keptCount)) + "\n")
+	b.WriteString(styleSection.Render(fmt.Sprintf("  NEEDS MY REVIEW · %d", len(m.inbox))) + "\n")
 
 	for j := range m.inbox {
-		if !reviewKept(m.inbox[j].State) {
-			continue
-		}
 		body := m.inboxBody(j, maxNumW, maxAuthorW)
 		b.WriteString(m.row(body, isCursor(selItem{isInbox: true, idx: j}), width))
 		b.WriteString("\n")

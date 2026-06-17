@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -128,10 +127,8 @@ func IssueExists(ctx context.Context, n int) bool {
 type ReviewState int
 
 const (
-	// ReviewPending means classification has not run yet.
-	ReviewPending ReviewState = iota
 	// NotReviewed means the user has submitted no review.
-	NotReviewed
+	NotReviewed ReviewState = iota
 	// UpdatedSinceReview means the user reviewed, but a newer commit landed after.
 	UpdatedSinceReview
 	// ReviewedCurrent means the user's latest review covers the latest commit.
@@ -148,137 +145,129 @@ type InboxPR struct {
 	State      ReviewState
 }
 
-// ReviewCandidates returns open PRs in the current repo that involve the user
-// and were not authored by them, minus any whose head branch is in localBranches
-// (those are represented as worktrees instead). The PRs come back unclassified
-// (State == ReviewPending); call ClassifyReview per PR to fill in the state.
-// Results are sorted most-recently-updated first.
-func ReviewCandidates(ctx context.Context, localBranches []string) ([]InboxPR, error) {
-	if _, err := cachedLogin(ctx); err != nil {
-		return nil, err // surface auth problems before the search
-	}
+// reviewInboxQuery fetches, in one call, the open PRs involving the viewer
+// (excluding their own) along with each PR's reviews and latest commit — enough
+// to classify every PR locally without a per-PR follow-up call.
+const reviewInboxQuery = `
+query($q: String!) {
+  viewer { login }
+  search(query: $q, type: ISSUE, first: 30) {
+    nodes {
+      ... on PullRequest {
+        number
+        title
+        updatedAt
+        headRefName
+        author { login }
+        reviews(last: 50) { nodes { author { login } submittedAt } }
+        commits(last: 1) { nodes { commit { committedDate } } }
+      }
+    }
+  }
+}`
 
-	out, err := run(ctx, "pr", "list",
-		"--search", "is:open involves:@me -author:@me",
-		"--limit", "30",
-		"--json", "number,title,headRefName,updatedAt,author")
+// ReviewInbox returns open PRs in nwo ("owner/repo") that involve the user, were
+// not authored by them, that they still owe a review on (never reviewed, or
+// reviewed before the latest commit), and that aren't already checked out as a
+// local worktree (those are shown as worktrees instead). A single GraphQL query
+// fetches the search results plus each PR's reviews and latest commit, so the
+// cost is one call regardless of PR count. Sorted most-recently-updated first.
+func ReviewInbox(ctx context.Context, nwo string, localBranches []string) ([]InboxPR, error) {
+	if nwo == "" {
+		return nil, fmt.Errorf("no repo for review inbox")
+	}
+	out, err := run(ctx, "api", "graphql",
+		"-f", "query="+reviewInboxQuery,
+		"-f", "q=repo:"+nwo+" is:pr is:open involves:@me -author:@me")
 	if err != nil {
 		return nil, err
 	}
-	var listed []struct {
-		Number      int    `json:"number"`
-		Title       string `json:"title"`
-		HeadRefName string `json:"headRefName"`
-		UpdatedAt   string `json:"updatedAt"`
-		Author      struct {
-			Login string `json:"login"`
-		} `json:"author"`
+
+	var resp struct {
+		Data struct {
+			Viewer struct {
+				Login string `json:"login"`
+			} `json:"viewer"`
+			Search struct {
+				Nodes []struct {
+					Number      int    `json:"number"`
+					Title       string `json:"title"`
+					UpdatedAt   string `json:"updatedAt"`
+					HeadRefName string `json:"headRefName"`
+					Author      struct {
+						Login string `json:"login"`
+					} `json:"author"`
+					Reviews struct {
+						Nodes []struct {
+							Author struct {
+								Login string `json:"login"`
+							} `json:"author"`
+							SubmittedAt string `json:"submittedAt"`
+						} `json:"nodes"`
+					} `json:"reviews"`
+					Commits struct {
+						Nodes []struct {
+							Commit struct {
+								CommittedDate string `json:"committedDate"`
+							} `json:"commit"`
+						} `json:"nodes"`
+					} `json:"commits"`
+				} `json:"nodes"`
+			} `json:"search"`
+		} `json:"data"`
 	}
-	if err := json.Unmarshal([]byte(out), &listed); err != nil {
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
 		return nil, err
 	}
+	login := resp.Data.Viewer.Login
 
 	local := make(map[string]bool, len(localBranches))
 	for _, b := range localBranches {
 		local[b] = true
 	}
 
-	var candidates []InboxPR
-	for _, p := range listed {
-		if local[p.HeadRefName] {
-			continue // already pulled down as a worktree
+	var inbox []InboxPR
+	for _, n := range resp.Data.Search.Nodes {
+		if n.Number == 0 || local[n.HeadRefName] {
+			continue // non-PR node, or already pulled down as a worktree
 		}
-		updated, _ := time.Parse(time.RFC3339, p.UpdatedAt)
-		candidates = append(candidates, InboxPR{
-			Number:     p.Number,
-			Title:      p.Title,
-			Author:     p.Author.Login,
-			HeadBranch: p.HeadRefName,
+
+		var myLatest time.Time
+		for _, r := range n.Reviews.Nodes {
+			if !strings.EqualFold(r.Author.Login, login) {
+				continue
+			}
+			if t, err := time.Parse(time.RFC3339, r.SubmittedAt); err == nil && t.After(myLatest) {
+				myLatest = t
+			}
+		}
+		var lastCommit time.Time
+		if len(n.Commits.Nodes) > 0 {
+			lastCommit, _ = time.Parse(time.RFC3339, n.Commits.Nodes[0].Commit.CommittedDate)
+		}
+
+		var state ReviewState
+		switch {
+		case myLatest.IsZero():
+			state = NotReviewed
+		case lastCommit.After(myLatest):
+			state = UpdatedSinceReview
+		default:
+			continue // reviewed and current — nothing owed
+		}
+
+		updated, _ := time.Parse(time.RFC3339, n.UpdatedAt)
+		inbox = append(inbox, InboxPR{
+			Number:     n.Number,
+			Title:      n.Title,
+			Author:     n.Author.Login,
+			HeadBranch: n.HeadRefName,
 			Updated:    updated,
-			State:      ReviewPending,
+			State:      state,
 		})
 	}
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Updated.After(candidates[j].Updated) })
-	return candidates, nil
-}
-
-// ClassifyReview reports what the user still owes on one PR (never reviewed,
-// reviewed-then-updated, or reviewed-and-current).
-func ClassifyReview(ctx context.Context, prNumber int) (ReviewState, error) {
-	login, err := cachedLogin(ctx)
-	if err != nil {
-		return ReviewedCurrent, err
-	}
-	return reviewStateFor(ctx, prNumber, login)
-}
-
-var (
-	loginOnce sync.Once
-	loginVal  string
-	loginErr  error
-)
-
-// cachedLogin returns the authenticated GitHub username, fetched once per process.
-func cachedLogin(ctx context.Context) (string, error) {
-	loginOnce.Do(func() {
-		out, err := run(ctx, "api", "user", "-q", ".login")
-		if err != nil {
-			loginErr = err
-			return
-		}
-		loginVal = strings.TrimSpace(out)
-		if loginVal == "" {
-			loginErr = fmt.Errorf("could not determine current gh user")
-		}
-	})
-	return loginVal, loginErr
-}
-
-// reviewStateFor compares the user's latest review timestamp against the PR's
-// latest commit to decide what (if anything) they still owe.
-func reviewStateFor(ctx context.Context, prNumber int, login string) (ReviewState, error) {
-	out, err := run(ctx, "pr", "view", strconv.Itoa(prNumber), "--json", "reviews,commits")
-	if err != nil {
-		return ReviewedCurrent, err
-	}
-	var data struct {
-		Reviews []struct {
-			Author struct {
-				Login string `json:"login"`
-			} `json:"author"`
-			SubmittedAt string `json:"submittedAt"`
-		} `json:"reviews"`
-		Commits []struct {
-			CommittedDate string `json:"committedDate"`
-		} `json:"commits"`
-	}
-	if err := json.Unmarshal([]byte(out), &data); err != nil {
-		return ReviewedCurrent, err
-	}
-
-	var myLatest time.Time
-	for _, r := range data.Reviews {
-		if !strings.EqualFold(r.Author.Login, login) {
-			continue
-		}
-		if t, err := time.Parse(time.RFC3339, r.SubmittedAt); err == nil && t.After(myLatest) {
-			myLatest = t
-		}
-	}
-	if myLatest.IsZero() {
-		return NotReviewed, nil
-	}
-
-	var lastCommit time.Time
-	for _, c := range data.Commits {
-		if t, err := time.Parse(time.RFC3339, c.CommittedDate); err == nil && t.After(lastCommit) {
-			lastCommit = t
-		}
-	}
-	if lastCommit.After(myLatest) {
-		return UpdatedSinceReview, nil
-	}
-	return ReviewedCurrent, nil
+	sort.Slice(inbox, func(i, j int) bool { return inbox[i].Updated.After(inbox[j].Updated) })
+	return inbox, nil
 }
 
 func run(ctx context.Context, args ...string) (string, error) {
