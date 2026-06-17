@@ -34,7 +34,7 @@ The function captures stdout from the binary, watches for a `__WTREE_CD__:<path>
 ## Usage
 
 ```
-wtree                             Interactive picker (cd/remove worktrees)
+wtree                             Dashboard picker (grouped worktrees + review inbox)
 wtree add <input>                 Smart-add worktree from any input:
   PR URL                            https://github.com/owner/repo/pull/123
   Issue URL                         https://github.com/owner/repo/issues/45
@@ -54,6 +54,7 @@ wtree help                        Show help
 ## Behavior
 
 - Worktrees are created under `.worktrees/` at the repo root (auto-added to `.gitignore`)
+- Running `wtree` with no args opens a **dashboard** of your current work. Worktrees are grouped by status — **Primary**, **In review** (open PR), **Merged · cleanup**, **In progress** (changes or commits ahead), **Idle** — and below them a **Needs my review** section lists open PRs that involve you (`is:open involves:@me -author:@me`) and that you still owe a review on, tagged `● not reviewed` or `↻ updated since your review`. PR numbers, associated issues, and the repo are clickable (OSC-8 links); `o` opens the selected row's PR/issue/repo in the browser and `i` opens its issue. Pressing `enter` on a review PR runs `wtree add` for it so you can review it locally. The `wtree rm` picker stays a flat list.
 - Files are copied into new worktrees based on patterns in `~/.config/wtree/config.toml` (global) and `.wtree/config.toml` (per-repo); press `e` in the picker to open the repo config or `g` for the global one. No built-in defaults — nothing is copied if neither file exists.
 - `wtree sync` re-runs that copy from the primary repo into existing worktrees so changes to your local-only config files propagate without recreating each worktree; it shows a per-worktree preview (new / overwrite / identical) and confirms before writing
 - Post-create commands run in each new worktree via the `[commands]` config section (same global + per-repo files as the patterns). `post_create` is an ordered list; each entry is a bare string (a builtin recipe name or a shell command) or a table (`{ run = "...", if_exists = "<relpath>", required = false }`). Commands run with cwd at the worktree root, on `wtree add` only (not `sync`). `if_exists` skips a step unless the named path is present in the worktree — e.g. `{ run = "./admin reset", if_exists = "admin" }` to seed fixtures only where an admin runner exists.
