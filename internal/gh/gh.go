@@ -270,6 +270,118 @@ func ReviewInbox(ctx context.Context, nwo string, localBranches []string) ([]Inb
 	return inbox, nil
 }
 
+// ReviewClass is where one of the user's own open PRs stands, from their POV.
+type ReviewClass int
+
+const (
+	// ReviewInProgress means the PR is out for review with nothing for the
+	// author to do — no feedback yet, or the author already responded last.
+	ReviewInProgress ReviewClass = iota
+	// ReviewChangesRequested means a reviewer left changes/comments the author
+	// hasn't responded to yet (formal change request, or an informal comment
+	// where the reviewer was the most recent actor).
+	ReviewChangesRequested
+	// ReviewApproved means the PR is approved and ready to merge.
+	ReviewApproved
+)
+
+const myReviewQuery = `
+query($q: String!) {
+  viewer { login }
+  search(query: $q, type: ISSUE, first: 50) {
+    nodes {
+      ... on PullRequest {
+        headRefName
+        reviewDecision
+        reviews(last: 50) { nodes { author { login } submittedAt } }
+        comments(last: 50) { nodes { author { login } createdAt } }
+      }
+    }
+  }
+}`
+
+// MyOpenPRReviewStates classifies each of the user's own open PRs in nwo by what
+// the author should do next, keyed by head branch. One GraphQL call, no stored
+// state. A branch absent from the map has no open PR of the user's.
+func MyOpenPRReviewStates(ctx context.Context, nwo string) (map[string]ReviewClass, error) {
+	if nwo == "" {
+		return nil, fmt.Errorf("no repo for review states")
+	}
+	out, err := run(ctx, "api", "graphql",
+		"-f", "query="+myReviewQuery,
+		"-f", "q=repo:"+nwo+" is:pr is:open author:@me")
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Data struct {
+			Viewer struct {
+				Login string `json:"login"`
+			} `json:"viewer"`
+			Search struct {
+				Nodes []struct {
+					HeadRefName    string `json:"headRefName"`
+					ReviewDecision string `json:"reviewDecision"`
+					Reviews        struct {
+						Nodes []struct {
+							Author struct {
+								Login string `json:"login"`
+							} `json:"author"`
+							SubmittedAt string `json:"submittedAt"`
+						} `json:"nodes"`
+					} `json:"reviews"`
+					Comments struct {
+						Nodes []struct {
+							Author struct {
+								Login string `json:"login"`
+							} `json:"author"`
+							CreatedAt string `json:"createdAt"`
+						} `json:"nodes"`
+					} `json:"comments"`
+				} `json:"nodes"`
+			} `json:"search"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return nil, err
+	}
+
+	me := resp.Data.Viewer.Login
+	states := make(map[string]ReviewClass, len(resp.Data.Search.Nodes))
+	for _, n := range resp.Data.Search.Nodes {
+		if n.HeadRefName == "" {
+			continue
+		}
+
+		// Find the most recent actor across reviews and comments.
+		var lastTime time.Time
+		var lastActor string
+		consider := func(login, ts string) {
+			if t, err := time.Parse(time.RFC3339, ts); err == nil && t.After(lastTime) {
+				lastTime, lastActor = t, login
+			}
+		}
+		for _, r := range n.Reviews.Nodes {
+			consider(r.Author.Login, r.SubmittedAt)
+		}
+		for _, c := range n.Comments.Nodes {
+			consider(c.Author.Login, c.CreatedAt)
+		}
+
+		switch {
+		case n.ReviewDecision == "APPROVED":
+			states[n.HeadRefName] = ReviewApproved
+		case lastActor != "" && !strings.EqualFold(lastActor, me):
+			// A reviewer (anyone but me) acted most recently — I owe a response.
+			states[n.HeadRefName] = ReviewChangesRequested
+		default:
+			// No feedback yet, or I responded last — nothing for me to do.
+			states[n.HeadRefName] = ReviewInProgress
+		}
+	}
+	return states, nil
+}
+
 func run(ctx context.Context, args ...string) (string, error) {
 	var stderr strings.Builder
 	cmd := exec.CommandContext(ctx, "gh", args...)

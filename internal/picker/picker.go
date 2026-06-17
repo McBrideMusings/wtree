@@ -116,6 +116,11 @@ type inboxMsg struct {
 	ghErr bool
 }
 
+type reviewStatesMsg struct {
+	states map[string]gh.ReviewClass
+	err    bool
+}
+
 type behindMsg struct {
 	count int
 	err   bool
@@ -142,10 +147,12 @@ type model struct {
 	status          []rowStatus
 	behindLoaded    bool
 	behindCount     int
-	inbox           []gh.InboxPR
-	inboxLoaded     bool
-	inboxErr        bool
-	spinnerFrame    int
+	inbox              []gh.InboxPR
+	inboxLoaded        bool
+	inboxErr           bool
+	reviewClass        map[string]gh.ReviewClass // my open PRs' review state, keyed by branch
+	reviewStatesLoaded bool
+	spinnerFrame       int
 	action          Action
 	addPRNumber     int
 	finished        bool
@@ -243,7 +250,7 @@ func (m model) Init() tea.Cmd {
 				branches = append(branches, w.Branch)
 			}
 		}
-		cmds = append(cmds, fetchInbox(m.ctx, m.nwo, branches), spinnerTick())
+		cmds = append(cmds, fetchInbox(m.ctx, m.nwo, branches), fetchReviewStates(m.ctx, m.nwo), spinnerTick())
 	}
 	return tea.Batch(cmds...)
 }
@@ -319,6 +326,18 @@ func fetchInbox(parent context.Context, nwo string, localBranches []string) tea.
 			return inboxMsg{ghErr: true}
 		}
 		return inboxMsg{prs: prs}
+	}
+}
+
+func fetchReviewStates(parent context.Context, nwo string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(parent, 15*time.Second)
+		defer cancel()
+		states, err := gh.MyOpenPRReviewStates(ctx, nwo)
+		if err != nil {
+			return reviewStatesMsg{err: true}
+		}
+		return reviewStatesMsg{states: states}
 	}
 }
 
@@ -442,6 +461,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.inboxLoaded = true
 		m.inboxErr = msg.ghErr
 		m.inbox = msg.prs
+		return m, nil
+	case reviewStatesMsg:
+		m.reviewStatesLoaded = true
+		if !msg.err {
+			m.reviewClass = msg.states
+		}
 		return m, nil
 	case behindMsg:
 		m.behindLoaded = !msg.err
@@ -628,13 +653,38 @@ func (m model) loading() bool {
 	if !m.dashboard {
 		return false
 	}
+	if !m.reviewStatesLoaded {
+		return true
+	}
 	return !m.inboxLoaded
 }
 
-// buckets groups worktree indices by status (0..4: primary, in-review,
-// merged/cleanup, in-progress, idle).
-func (m model) buckets() [5][]int {
-	var bs [5][]int
+// Status buckets, in display order. An open PR's bucket is refined by its review
+// state (changes-requested / approved / in-review) for the user's own PRs.
+const (
+	bktPrimary = iota
+	bktChanges
+	bktApproved
+	bktInReview
+	bktMerged
+	bktInProgress
+	bktIdle
+	bucketCount
+)
+
+var bucketLabels = [bucketCount]string{
+	bktPrimary:    "PRIMARY",
+	bktChanges:    "CHANGES REQUESTED",
+	bktApproved:   "APPROVED",
+	bktInReview:   "IN REVIEW",
+	bktMerged:     "MERGED · cleanup",
+	bktInProgress: "IN PROGRESS",
+	bktIdle:       "IDLE",
+}
+
+// buckets groups worktree indices by status bucket.
+func (m model) buckets() [bucketCount][]int {
+	var bs [bucketCount][]int
 	for i := range m.list {
 		b := m.bucketOf(i)
 		bs[b] = append(bs[b], i)
@@ -645,21 +695,30 @@ func (m model) buckets() [5][]int {
 // bucketOf returns the status bucket index for worktree i.
 func (m model) bucketOf(i int) int {
 	if i == m.mainIndex {
-		return 0
+		return bktPrimary
 	}
 	st := m.status[i]
 	if st.prLoaded && st.prFound {
 		switch st.prState {
 		case "OPEN":
-			return 1
+			// Refine by review state for my own open PRs; a branch with no
+			// entry (not my PR, or none returned) falls through to IN REVIEW.
+			switch m.reviewClass[m.list[i].Branch] {
+			case gh.ReviewApproved:
+				return bktApproved
+			case gh.ReviewChangesRequested:
+				return bktChanges
+			default:
+				return bktInReview
+			}
 		case "MERGED", "CLOSED":
-			return 2
+			return bktMerged
 		}
 	}
 	if !st.loaded || st.dirty || st.aheadCount > 0 {
-		return 3
+		return bktInProgress
 	}
-	return 4
+	return bktIdle
 }
 
 // selectableItems is the ordered list the cursor moves over: worktrees (only
@@ -674,7 +733,7 @@ func (m model) selectableItems() []selItem {
 	}
 	if m.worktreesReady() {
 		bs := m.buckets()
-		for b := range 5 {
+		for b := range bucketCount {
 			for _, i := range bs[b] {
 				items = append(items, selItem{idx: i})
 			}
@@ -997,14 +1056,13 @@ func (m model) viewDashboard(width int, fk func(string, string) string, sep stri
 		b.WriteString(styleName.Render("  "+m.nwo) + "  " + hyperlink(url, styleLink.Render(url+" ↗")) + "\n")
 	}
 
-	labels := [5]string{"PRIMARY", "IN REVIEW", "MERGED · cleanup", "IN PROGRESS", "IDLE"}
 	bs := m.buckets()
-	for bIdx := range 5 {
+	for bIdx := range bucketCount {
 		if len(bs[bIdx]) == 0 {
 			continue
 		}
 		b.WriteString("\n")
-		b.WriteString(styleSection.Render("  "+labels[bIdx]) + "\n")
+		b.WriteString(styleSection.Render("  "+bucketLabels[bIdx]) + "\n")
 		for _, i := range bs[bIdx] {
 			body := m.worktreeBody(c, i)
 			b.WriteString(m.row(body, isCursor(selItem{idx: i}), width))
