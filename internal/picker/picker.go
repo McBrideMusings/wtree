@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/McBrideMusings/wtree/internal/gh"
 	"github.com/McBrideMusings/wtree/internal/gitwt"
+	"github.com/McBrideMusings/wtree/internal/slug"
 )
 
 type Action int
@@ -53,9 +53,6 @@ const (
 	DefaultEnter  DefaultAction = "cd"
 	DefaultRemove DefaultAction = "remove"
 )
-
-// issueBranchRe matches a leading "<number>-" segment, e.g. "38-fix-thing".
-var issueBranchRe = regexp.MustCompile(`^(\d+)-`)
 
 // Run shows the picker for the worktrees passed in (callers filter the main
 // worktree out themselves) and returns what the user picked. nwo is the repo's
@@ -182,11 +179,11 @@ type rowStatus struct {
 var (
 	styleSelected     = lipgloss.NewStyle().Reverse(true)
 	styleFooter       = lipgloss.NewStyle().Faint(true)
-	styleFooterKey    = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))            // cyan keys
-	styleDirty        = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))            // yellow
-	styleCurrent      = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))            // green
+	styleFooterKey    = lipgloss.NewStyle().Foreground(lipgloss.Color("6")) // cyan keys
+	styleDirty        = lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // yellow
+	styleCurrent      = lipgloss.NewStyle().Foreground(lipgloss.Color("2")) // green
 	styleAge          = lipgloss.NewStyle().Faint(true)
-	styleBranch       = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))            // cyan
+	styleBranch       = lipgloss.NewStyle().Foreground(lipgloss.Color("6")) // cyan
 	styleParens       = lipgloss.NewStyle().Faint(true)
 	styleName         = lipgloss.NewStyle().Bold(true)
 	styleArrow        = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true) // yellow bold
@@ -200,11 +197,11 @@ var (
 	styleSection      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4")) // blue bold
 	styleIssue        = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))            // magenta
 	styleLink         = lipgloss.NewStyle().Faint(true)
-	styleNotReviewed  = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))            // yellow
-	styleUpdated      = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))            // cyan
+	styleNotReviewed  = lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // yellow
+	styleUpdated      = lipgloss.NewStyle().Foreground(lipgloss.Color("6")) // cyan
 	styleAuthor       = lipgloss.NewStyle().Faint(true)
-	styleUpToDate     = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))            // green
-	styleSpinner      = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))            // cyan
+	styleUpToDate     = lipgloss.NewStyle().Foreground(lipgloss.Color("2")) // green
+	styleSpinner      = lipgloss.NewStyle().Foreground(lipgloss.Color("6")) // cyan
 )
 
 func newModel(ctx context.Context, prompt string, defAction DefaultAction, list []gitwt.Worktree, currentPath, mainPath, defaultBranch, nwo string, dashboard bool) model {
@@ -305,15 +302,10 @@ func fetchLinkedIssue(parent context.Context, index, prNumber int) tea.Cmd {
 // worktree has no PR-declared issue.
 func fetchHeuristicIssue(parent context.Context, index int, branch string) tea.Cmd {
 	return func() tea.Msg {
-		seg := branch
-		if i := strings.LastIndex(seg, "/"); i >= 0 {
-			seg = seg[i+1:]
-		}
-		match := issueBranchRe.FindStringSubmatch(seg)
-		if match == nil {
+		num, ok := slug.IssueNumberFromBranch(branch)
+		if !ok {
 			return issueMsg{index: index}
 		}
-		num, _ := strconv.Atoi(match[1])
 		ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 		defer cancel()
 		if !gh.IssueExists(ctx, num) {
