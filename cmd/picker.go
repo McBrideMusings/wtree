@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 
 	"github.com/McBrideMusings/wtree/internal/config"
 	"github.com/McBrideMusings/wtree/internal/gitwt"
@@ -20,8 +21,9 @@ func runPicker(ctx context.Context) error {
 		return err
 	}
 
-	prompt := "Worktrees (↑/↓ navigate · enter: cd · x: remove · q: quit):"
-	sel, err := picker.Run(ctx, prompt, picker.DefaultEnter, list, current, repoRoot, defaultBranch)
+	nwo, _ := gitwt.OriginNWO(ctx)
+	prompt := "Your work:"
+	sel, err := picker.Run(ctx, prompt, picker.DefaultEnter, list, current, repoRoot, defaultBranch, nwo, true)
 	if err != nil {
 		return err
 	}
@@ -30,6 +32,8 @@ func runPicker(ctx context.Context) error {
 		shim.PrintCD(sel.Worktree.Path)
 		fmt.Fprintf(os.Stderr, "Now in: %s\n", sel.Worktree.Path)
 		return nil
+	case picker.ActionAddPR:
+		return runAdd(ctx, strconv.Itoa(sel.PRNumber))
 	case picker.ActionRemove:
 		return doRemove(ctx, repoRoot, sel.Worktree.Path, false)
 	case picker.ActionRemoveMerged:
@@ -53,7 +57,7 @@ func runRemoveViaPicker(ctx context.Context) error {
 	}
 
 	prompt := "Select worktree to remove (↑/↓ navigate · enter: remove · q: quit):"
-	sel, err := picker.Run(ctx, prompt, picker.DefaultRemove, filtered, current, "", "")
+	sel, err := picker.Run(ctx, prompt, picker.DefaultRemove, filtered, current, "", "", "", false)
 	if err != nil {
 		return err
 	}
