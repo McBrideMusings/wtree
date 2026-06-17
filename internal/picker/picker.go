@@ -504,6 +504,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// While the dashboard is still loading, only quit keys are live — no
+		// navigation or destructive action runs on a partial dataset.
+		if m.dashboard && m.loading() {
+			if s := msg.String(); s == "ctrl+c" || s == "q" || s == "esc" {
+				m.action = ActionNone
+				m.finished = true
+				return m, tea.Quit
+			}
+			return m, nil
+		}
+
 		items := m.selectableItems()
 		if len(items) == 0 {
 			if s := msg.String(); s == "ctrl+c" || s == "q" || s == "esc" {
