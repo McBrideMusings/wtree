@@ -2,6 +2,29 @@ package slug
 
 import "testing"
 
+func TestIssueNumberFromBranch(t *testing.T) {
+	cases := []struct {
+		branch  string
+		wantNum int
+		wantOK  bool
+	}{
+		{"pierce/38-fix-thing", 38, true},
+		{"42-add-feature", 42, true},
+		{"pierce/1014-daily-challenge", 1014, true},
+		{"2fa-login", 0, false},     // digits not followed by a dash
+		{"v2-thing", 0, false},      // doesn't start with a digit
+		{"pierce/feature-x", 0, false},
+		{"main", 0, false},
+		{"", 0, false},
+	}
+	for _, c := range cases {
+		num, ok := IssueNumberFromBranch(c.branch)
+		if num != c.wantNum || ok != c.wantOK {
+			t.Errorf("IssueNumberFromBranch(%q) = (%d, %t), want (%d, %t)", c.branch, num, ok, c.wantNum, c.wantOK)
+		}
+	}
+}
+
 func TestSanitize(t *testing.T) {
 	cases := []struct {
 		in, want string

@@ -15,8 +15,9 @@ const (
 )
 
 var (
-	nonAlnumDash = regexp.MustCompile(`[^a-z0-9-]+`)
-	dashRun      = regexp.MustCompile(`-+`)
+	nonAlnumDash  = regexp.MustCompile(`[^a-z0-9-]+`)
+	dashRun       = regexp.MustCompile(`-+`)
+	issueBranchRe = regexp.MustCompile(`^(\d+)-`)
 
 	stopwords = map[string]bool{
 		"a": true, "an": true, "and": true, "at": true, "by": true,
@@ -90,6 +91,26 @@ func IssueSlug(num int, title string) string {
 		compact = Trim(sanitized, maxLen)
 	}
 	return strconv.Itoa(num) + "-" + compact
+}
+
+// IssueNumberFromBranch extracts the issue number that IssueSlug encodes at the
+// front of a branch name (after any "owner/" prefix) — e.g. "pierce/38-fix-bug"
+// yields (38, true). Returns (0, false) when the branch's final segment does not
+// begin with "<digits>-", so a branch like "2fa-login" is correctly rejected.
+func IssueNumberFromBranch(branch string) (int, bool) {
+	seg := branch
+	if i := strings.LastIndex(seg, "/"); i >= 0 {
+		seg = seg[i+1:]
+	}
+	match := issueBranchRe.FindStringSubmatch(seg)
+	if match == nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(match[1])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 func envInt(key string, def int) int {
