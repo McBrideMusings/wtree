@@ -116,6 +116,25 @@ func LinkedIssue(ctx context.Context, prNumber int) (int, bool, error) {
 	return n, true, nil
 }
 
+// MergedPRHeadBranches returns the set of head branch names from the most recent
+// merged PRs in the current repo (up to limit). Used to detect local branches
+// whose PR was squash- or rebase-merged — git's own --merged check misses those
+// because the branch commits never land on the default branch. A gh failure
+// returns an empty set and the error, so callers can degrade to git-only signals.
+func MergedPRHeadBranches(ctx context.Context, limit int) (map[string]bool, error) {
+	set := map[string]bool{}
+	out, err := run(ctx, "pr", "list", "--state", "merged", "--limit", strconv.Itoa(limit), "--json", "headRefName", "-q", ".[].headRefName")
+	if err != nil {
+		return set, err
+	}
+	for _, b := range strings.Split(strings.TrimSpace(out), "\n") {
+		if b = strings.TrimSpace(b); b != "" {
+			set[b] = true
+		}
+	}
+	return set, nil
+}
+
 // IssueExists reports whether issue #n exists in the current repo. A gh failure
 // (including "not found") returns false.
 func IssueExists(ctx context.Context, n int) bool {

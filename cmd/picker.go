@@ -37,7 +37,7 @@ func runPicker(ctx context.Context) error {
 	case picker.ActionRemove:
 		return doRemove(ctx, repoRoot, sel.Worktree.Path, false)
 	case picker.ActionRemoveMerged:
-		return doRemoveBatch(ctx, repoRoot, sel.Worktrees)
+		return doRemoveBatch(ctx, repoRoot, sel.Worktrees, sel.Branches)
 	case picker.ActionPull:
 		return doPull(ctx, repoRoot, defaultBranch)
 	case picker.ActionEditConfig:
