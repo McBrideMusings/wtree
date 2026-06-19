@@ -38,14 +38,13 @@ var (
 )
 
 type model struct {
-	branches    []gitwt.Branch
-	selected    []bool
-	cursor      int
-	width       int
-	mode        viewMode
-	confirmOnly bool // when true, n/esc on confirm screen quits instead of going back to list
-	confirmed   bool
-	finished    bool
+	branches  []gitwt.Branch
+	selected  []bool
+	cursor    int
+	width     int
+	mode      viewMode
+	confirmed bool
+	finished  bool
 }
 
 func newModel(branches []gitwt.Branch) model {
@@ -78,24 +77,6 @@ func Run(ctx context.Context, branches []gitwt.Branch) ([]gitwt.Branch, error) {
 		}
 	}
 	return result, nil
-}
-
-// RunConfirm shows a batch-confirm screen for branches that are already known
-// to be safe to delete (e.g. merged). No individual selection — the user
-// either confirms all or cancels. Returns true if the user confirmed.
-func RunConfirm(ctx context.Context, branches []gitwt.Branch) (bool, error) {
-	if len(branches) == 0 {
-		return false, nil
-	}
-	m := newModel(branches)
-	m.mode = modeConfirm
-	m.confirmOnly = true
-	prog := tea.NewProgram(m, tea.WithContext(ctx), tea.WithOutput(os.Stderr))
-	final, err := prog.Run()
-	if err != nil {
-		return false, err
-	}
-	return final.(model).confirmed, nil
 }
 
 func branchTag(br gitwt.Branch) string {
@@ -157,10 +138,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.finished = true
 				return m, tea.Quit
 			case "n", "esc", "q", "ctrl+c":
-				if m.confirmOnly {
-					m.finished = true
-					return m, tea.Quit
-				}
 				m.mode = modeList
 			}
 		default:

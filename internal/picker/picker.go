@@ -28,7 +28,7 @@ const (
 	ActionRemove
 	ActionEditConfig
 	ActionEditGlobalConfig
-	ActionRemoveMerged
+	ActionRemoveMerged // prune merged worktrees + dead branches in one batch
 	ActionPull
 	ActionAddPR // check out a review-inbox PR as a new worktree
 )
@@ -36,7 +36,8 @@ const (
 type Selection struct {
 	Action    Action
 	Worktree  gitwt.Worktree
-	Worktrees []gitwt.Worktree // populated for ActionRemoveMerged
+	Worktrees []gitwt.Worktree // merged worktrees to remove (ActionRemoveMerged)
+	Branches  []string         // dead branches to delete (ActionRemoveMerged)
 	PRNumber  int              // populated for ActionAddPR
 }
 
@@ -81,7 +82,7 @@ func Run(ctx context.Context, prompt string, defAction DefaultAction, list []git
 		for i, idx := range fm.mergedToRemove {
 			wts[i] = fm.list[idx]
 		}
-		return Selection{Action: ActionRemoveMerged, Worktrees: wts}, nil
+		return Selection{Action: ActionRemoveMerged, Worktrees: wts, Branches: fm.deadToRemove}, nil
 	default:
 		return Selection{Action: fm.action, Worktree: fm.list[fm.selectedWtIndex]}, nil
 	}
@@ -126,40 +127,56 @@ type behindMsg struct {
 	err   bool
 }
 
+type deadBranchesMsg struct {
+	entries []deadEntry
+	err     bool // the git scan failed (distinct from "no dead branches")
+}
+
 type spinnerTickMsg struct{}
 
 type flashResultMsg struct{ text string }
 
 type model struct {
-	ctx             context.Context
-	prompt          string
-	defAction       DefaultAction
-	list            []gitwt.Worktree
-	currentPath     string
-	mainPath        string // primary worktree path; "" when no main row is shown
-	mainIndex       int    // index of the main row in list, or -1
-	defaultBranch   string // branch compared against origin for the behind check
-	nwo             string // owner/repo for hyperlinks
-	dashboard       bool   // group by status + show review inbox
-	cursor          int    // ordinal over selectable items
-	selectedWtIndex int    // resolved worktree index for the final selection
-	width           int
-	status          []rowStatus
-	behindLoaded    bool
-	behindCount     int
+	ctx                context.Context
+	prompt             string
+	defAction          DefaultAction
+	list               []gitwt.Worktree
+	currentPath        string
+	mainPath           string // primary worktree path; "" when no main row is shown
+	mainIndex          int    // index of the main row in list, or -1
+	defaultBranch      string // branch compared against origin for the behind check
+	nwo                string // owner/repo for hyperlinks
+	dashboard          bool   // group by status + show review inbox
+	cursor             int    // ordinal over selectable items
+	selectedWtIndex    int    // resolved worktree index for the final selection
+	width              int
+	status             []rowStatus
+	behindLoaded       bool
+	behindCount        int
 	inbox              []gh.InboxPR
 	inboxLoaded        bool
 	inboxErr           bool
 	reviewClass        map[string]gh.ReviewClass // my open PRs' review state, keyed by branch
 	reviewStatesLoaded bool
 	spinnerFrame       int
-	action          Action
-	addPRNumber     int
-	finished        bool
-	mode            viewMode
-	mergedToRemove  []int
-	flashMsg        string
-	ghUnavailable   bool
+	dead               []deadEntry // dead local branches with no worktree (dashboard only)
+	deadLoaded         bool
+	deadErr            bool // the dead-branch scan failed
+	action             Action
+	addPRNumber        int
+	finished           bool
+	mode               viewMode
+	mergedToRemove     []int
+	deadToRemove       []string
+	flashMsg           string
+	ghUnavailable      bool
+}
+
+// deadEntry is a local branch that is provably dead (no worktree) plus the
+// reason it qualified, shown in the dashboard's DEAD BRANCHES section.
+type deadEntry struct {
+	name   string
+	reason string
 }
 
 type rowStatus struct {
@@ -250,9 +267,35 @@ func (m model) Init() tea.Cmd {
 				branches = append(branches, w.Branch)
 			}
 		}
-		cmds = append(cmds, fetchInbox(m.ctx, m.nwo, branches), fetchReviewStates(m.ctx, m.nwo), spinnerTick())
+		cmds = append(cmds, fetchInbox(m.ctx, m.nwo, branches), fetchReviewStates(m.ctx, m.nwo), fetchDeadBranches(m.ctx), spinnerTick())
 	}
 	return tea.Batch(cmds...)
+}
+
+// fetchDeadBranches finds local branches with no worktree that are provably
+// dead — upstream gone, PR merged on GitHub, merged into the default branch, or
+// fully pushed. It fetches + prunes first (a network call, never touches origin)
+// so the "remote gone" and "fully pushed" signals are judged against current
+// origin. A gh failure degrades to the git-only signals; a git failure sets
+// err so the section can show an "unavailable" hint instead of "none".
+// Classification is shared with `wtree branches` via gitwt.ClassifyDead.
+func fetchDeadBranches(parent context.Context) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(parent, 15*time.Second)
+		defer cancel()
+		gitwt.FetchPrune(ctx)
+		cands, err := gitwt.ListCleanupCandidates(ctx, 4*24*time.Hour)
+		if err != nil {
+			return deadBranchesMsg{err: true}
+		}
+		mergedPRs, _ := gh.MergedPRHeadBranches(ctx, 200)
+		dead, _ := gitwt.ClassifyDead(cands, mergedPRs)
+		entries := make([]deadEntry, len(dead))
+		for i, d := range dead {
+			entries[i] = deadEntry{d.Name, d.Reason}
+		}
+		return deadBranchesMsg{entries: entries}
+	}
 }
 
 func spinnerTick() tea.Cmd {
@@ -474,6 +517,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.behindCount = msg.count
 		}
 		return m, nil
+	case deadBranchesMsg:
+		m.deadLoaded = true
+		m.deadErr = msg.err
+		m.dead = msg.entries
+		return m, nil
 	case spinnerTickMsg:
 		m.spinnerFrame++
 		if m.loading() {
@@ -541,6 +589,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor++
 			}
 		case "enter":
+			if cur.isDead {
+				// Prune branches only — no worktrees. Open the same confirm
+				// screen with the worktree list empty.
+				m.mergedToRemove = nil
+				m.deadToRemove = m.deadNames()
+				m.mode = modeConfirmRemoveMerged
+				break
+			}
 			if cur.isInbox {
 				m.action = ActionAddPR
 				m.addPRNumber = m.inbox[cur.idx].Number
@@ -560,6 +616,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.finished = true
 			return m, tea.Quit
 		case "x":
+			if cur.isDead {
+				m.flashMsg = "Press enter to prune branches, or D to prune merged worktrees too."
+				break
+			}
 			if cur.isInbox {
 				m.flashMsg = "Nothing to remove — that's a review PR, not a worktree."
 				break
@@ -605,14 +665,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					indices = append(indices, i)
 				}
 			}
+			names := m.deadNames()
 			switch {
-			case len(indices) > 0:
+			case len(indices) > 0 || len(names) > 0:
 				m.mergedToRemove = indices
+				m.deadToRemove = names
 				m.mode = modeConfirmRemoveMerged
 			case m.ghUnavailable:
 				m.flashMsg = "gh unavailable – PR status could not be loaded."
 			default:
-				m.flashMsg = "No merged worktrees found."
+				m.flashMsg = "Nothing to prune — no merged worktrees or dead branches."
 			}
 		case "e":
 			m.action = ActionEditConfig
@@ -627,10 +689,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// selItem identifies one selectable row: a worktree (by list index) or an inbox
-// PR (by inbox index).
+// selItem identifies one selectable row: a worktree (by list index), an inbox
+// PR (by inbox index), or the single aggregate "prune branches" row (isDead).
 type selItem struct {
 	isInbox bool
+	isDead  bool // the PRUNABLE BRANCHES row; enter prunes branches only
 	idx     int
 }
 
@@ -656,6 +719,9 @@ func (m model) loading() bool {
 	if !m.reviewStatesLoaded {
 		return true
 	}
+	// The dead-branch scan does a network fetch+prune; it does NOT gate the
+	// render. The dashboard paints as soon as worktrees, review states, and the
+	// inbox are ready, and the PRUNABLE BRANCHES row fills in when it arrives.
 	return !m.inboxLoaded
 }
 
@@ -739,6 +805,9 @@ func (m model) selectableItems() []selItem {
 			}
 		}
 	}
+	if len(m.dead) > 0 {
+		items = append(items, selItem{isDead: true})
+	}
 	for j := range m.inbox {
 		items = append(items, selItem{isInbox: true, idx: j})
 	}
@@ -746,6 +815,9 @@ func (m model) selectableItems() []selItem {
 }
 
 func (m model) openURLFor(r selItem) string {
+	if r.isDead {
+		return ""
+	}
 	if r.isInbox {
 		return gh.PRURL(m.nwo, m.inbox[r.idx].Number)
 	}
@@ -760,7 +832,7 @@ func (m model) openURLFor(r selItem) string {
 }
 
 func (m model) issueURLFor(r selItem) string {
-	if r.isInbox {
+	if r.isInbox || r.isDead {
 		return ""
 	}
 	if st := m.status[r.idx]; st.issueNum > 0 {
@@ -1070,6 +1142,7 @@ func (m model) viewDashboard(width int, fk func(string, string) string, sep stri
 		}
 	}
 
+	m.writePrunableBranches(&b, width, isCursor)
 	m.writeInbox(&b, width, isCursor)
 
 	if m.flashMsg != "" {
@@ -1142,6 +1215,36 @@ func (m model) writeInbox(b *strings.Builder, width int, isCursor func(selItem) 
 	b.WriteString("\n") // blank line between the last review row and the footer
 }
 
+// writePrunableBranches renders the PRUNABLE BRANCHES section: one selectable
+// summary row standing in for all dead local branches (no worktree). enter on it
+// prunes branches only; D prunes them together with merged worktrees. The list
+// is never enumerated here, so the section stays one line regardless of count.
+func (m model) writePrunableBranches(b *strings.Builder, width int, isCursor func(selItem) bool) {
+	if len(m.dead) == 0 {
+		if m.deadErr {
+			b.WriteString("\n")
+			b.WriteString(styleFooter.Render("  (prunable branches unavailable — branch scan failed)") + "\n")
+		}
+		return
+	}
+	b.WriteString("\n")
+	b.WriteString(styleSection.Render(fmt.Sprintf("  PRUNABLE BRANCHES · %d", len(m.dead))) + "\n")
+	body := styleBranch.Render(fmt.Sprintf("prune %d dead %s", len(m.dead), plural2(len(m.dead), "branch"))) +
+		styleParens.Render(" · ") + styleAge.Render("enter to delete · origin untouched")
+	b.WriteString(m.row(body, isCursor(selItem{isDead: true}), width))
+	b.WriteString("\n")
+}
+
+// deadNames returns the dead-branch names as a flat slice, the form needed by
+// deadToRemove and the batch remover.
+func (m model) deadNames() []string {
+	names := make([]string, len(m.dead))
+	for i, d := range m.dead {
+		names[i] = d.name
+	}
+	return names
+}
+
 func (m model) inboxBody(j, maxNumW, maxAuthorW int) string {
 	pr := m.inbox[j]
 	numText := fmt.Sprintf("#%d", pr.Number)
@@ -1171,7 +1274,7 @@ func (m model) dashboardFooter(fk func(string, string) string, sep string) strin
 		fk("↑/↓ j/k", "navigate"),
 		fk("enter", "cd / check out"),
 		fk("x", "remove"),
-		fk("D", "remove merged"),
+		fk("D", m.pruneLabel()),
 	}
 	if m.mainIndex >= 0 && m.behindLoaded && m.behindCount > 0 {
 		keys = append(keys, fk("p", "pull origin/"+m.defaultBranch))
@@ -1186,42 +1289,93 @@ func (m model) dashboardFooter(fk func(string, string) string, sep string) strin
 	return strings.Join(keys, sep)
 }
 
+// maxDeadListed caps how many dead branches are spelled out in the confirm
+// screen; the rest are summarised so the prompt never grows into a wall of text.
+const maxDeadListed = 12
+
+// pruneLabel is the dashboard footer hint for D, reflecting how many dead
+// branches will be swept up alongside merged worktrees.
+func (m model) pruneLabel() string {
+	if len(m.dead) > 0 {
+		return fmt.Sprintf("prune merged + %d dead", len(m.dead))
+	}
+	return "prune merged"
+}
+
 func (m model) viewConfirm(width int, fk func(string, string) string, sep string) string {
 	var b strings.Builder
-	n := len(m.mergedToRemove)
-	noun := "worktree"
-	if n != 1 {
-		noun = "worktrees"
-	}
-	b.WriteString(styleConfirmTitle.Render(fmt.Sprintf("  Remove %d merged %s?", n, noun)))
+	nw, nb := len(m.mergedToRemove), len(m.deadToRemove)
+	b.WriteString(styleConfirmTitle.Render("  Prune " + pruneTitle(nw, nb) + "?"))
 	b.WriteString("\n\n")
 
-	for _, idx := range m.mergedToRemove {
-		w := m.list[idx]
-		st := m.status[idx]
-		name := filepath.Base(w.Path)
-		row := "    " + styleName.Render(name) + "  " + styleParens.Render("(") + styleBranch.Render(w.Branch) + styleParens.Render(")")
-		if st.loaded && st.age != "" {
-			extra := styleAge.Render(" · " + st.age)
+	if nw > 0 {
+		b.WriteString(styleSection.Render(fmt.Sprintf("  %d merged %s", nw, plural2(nw, "worktree"))) + "\n")
+		for _, idx := range m.mergedToRemove {
+			w := m.list[idx]
+			st := m.status[idx]
+			name := filepath.Base(w.Path)
+			row := "    " + styleName.Render(name) + "  " + styleParens.Render("(") + styleBranch.Render(w.Branch) + styleParens.Render(")")
+			if st.loaded && st.age != "" {
+				extra := styleAge.Render(" · " + st.age)
+				if lipgloss.Width(row+extra) <= width {
+					row += extra
+				}
+			}
+			extra := styleMerged.Render(" · ✓ merged")
 			if lipgloss.Width(row+extra) <= width {
 				row += extra
 			}
+			b.WriteString(row + "\n")
 		}
-		extra := styleMerged.Render(" · ✓ merged")
-		if lipgloss.Width(row+extra) <= width {
-			row += extra
+	}
+
+	if nb > 0 {
+		if nw > 0 {
+			b.WriteString("\n")
 		}
-		b.WriteString(row)
-		b.WriteString("\n")
+		b.WriteString(styleSection.Render(fmt.Sprintf("  %d dead %s", nb, plural2(nb, "branch"))) + "\n")
+		shown := m.dead
+		if len(shown) > maxDeadListed {
+			shown = shown[:maxDeadListed]
+		}
+		for _, d := range shown {
+			b.WriteString("    " + styleBranch.Render(d.name) + styleParens.Render(" · ") + styleMerged.Render(d.reason) + "\n")
+		}
+		if nb > maxDeadListed {
+			b.WriteString(styleAge.Render(fmt.Sprintf("    …and %d more (all will be deleted)", nb-maxDeadListed)) + "\n")
+		}
 	}
 
 	b.WriteString("\n")
+	b.WriteString(styleFooter.Render("  Local branches only — origin is never touched.") + "\n\n")
 	footer := "  " + strings.Join([]string{
 		fk("y/enter", "confirm"),
 		fk("n/esc", "cancel"),
 	}, sep)
 	b.WriteString(footer)
 	return b.String()
+}
+
+// pruneTitle renders the confirm headline for nw worktrees and nb branches.
+func pruneTitle(nw, nb int) string {
+	switch {
+	case nw > 0 && nb > 0:
+		return fmt.Sprintf("%d %s and %d %s", nw, plural2(nw, "worktree"), nb, plural2(nb, "branch"))
+	case nw > 0:
+		return fmt.Sprintf("%d merged %s", nw, plural2(nw, "worktree"))
+	default:
+		return fmt.Sprintf("%d dead %s", nb, plural2(nb, "branch"))
+	}
+}
+
+func plural2(n int, singular string) string {
+	if n == 1 {
+		return singular
+	}
+	if singular == "branch" {
+		return "branches"
+	}
+	return singular + "s"
 }
 
 func truncate(s string, n int) string {

@@ -10,21 +10,35 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/McBrideMusings/wtree/internal/branchpicker"
+	"github.com/McBrideMusings/wtree/internal/gh"
 	"github.com/McBrideMusings/wtree/internal/gitwt"
+)
+
+var (
+	branchesPruneOnly bool
+	branchesDryRun    bool
 )
 
 var branchesCmd = &cobra.Command{
 	Use:   "branches",
-	Short: "clean up stale and merged local branches",
-	Long: `Lists local branches that are merged into the default branch or have not
-been committed to in more than 4 days, then lets you pick which ones to delete.
-Only local branches are deleted — the remote is never touched.`,
+	Short: "clean up dead and stale local branches",
+	Long: `Force-deletes local branches that are provably dead — a merged or closed
+PR, an upstream branch that was deleted on origin, or merged into the default
+branch — with no prompt. Anything that survives is offered in a picker.
+
+Only local branches are ever deleted; origin is never touched.
+
+  wtree branches            delete dead branches, then pick from the stale rest
+  wtree branches --prune    delete dead branches only, skip the picker
+  wtree branches --dry-run  show what would be deleted, delete nothing`,
 	RunE: func(c *cobra.Command, args []string) error {
 		return runBranches(c.Context())
 	},
 }
 
 func init() {
+	branchesCmd.Flags().BoolVar(&branchesPruneOnly, "prune", false, "delete dead branches only; skip the interactive picker")
+	branchesCmd.Flags().BoolVar(&branchesDryRun, "dry-run", false, "show what would be deleted without deleting anything")
 	rootCmd.AddCommand(branchesCmd)
 }
 
@@ -33,62 +47,92 @@ func runBranches(ctx context.Context) error {
 		return errors.New("not inside a git repository")
 	}
 
+	fmt.Fprintln(os.Stderr, "Fetching and pruning remote-tracking branches...")
+	gitwt.FetchPrune(ctx)
+
 	fmt.Fprintln(os.Stderr, "Loading branches...")
 	candidates, err := gitwt.ListCleanupCandidates(ctx, 4*24*time.Hour)
 	if err != nil {
 		return err
 	}
 	if len(candidates) == 0 {
-		fmt.Fprintln(os.Stderr, "No stale or merged branches found.")
+		fmt.Fprintln(os.Stderr, "No dead or stale branches found.")
 		return nil
 	}
 
-	// Merged branches and non-personal stale branches go to a batch confirm —
-	// no individual selection needed. Personal stale branches go to the picker.
-	var autoBatch, personalStale []gitwt.Branch
-	for _, br := range candidates {
-		if br.IsMerged || !br.IsPersonal {
-			autoBatch = append(autoBatch, br)
-		} else {
-			personalStale = append(personalStale, br)
-		}
-	}
+	// Branches whose PR was squash- or rebase-merged on GitHub never show as
+	// merged to git. Best-effort: a gh failure leaves the set empty and we fall
+	// back to the git-only signals (local-merged, upstream-gone, fully-pushed).
+	mergedPRs, _ := gh.MergedPRHeadBranches(ctx, 200)
+	dead, survivors := gitwt.ClassifyDead(candidates, mergedPRs)
 
-	var toDelete []gitwt.Branch
-
-	if len(autoBatch) > 0 {
-		ok, err := branchpicker.RunConfirm(ctx, autoBatch)
-		if err != nil {
-			return err
-		}
-		if ok {
-			toDelete = append(toDelete, autoBatch...)
-		}
-	}
-
-	if len(personalStale) > 0 {
-		picked, err := branchpicker.Run(ctx, personalStale)
-		if err != nil {
-			return err
-		}
-		toDelete = append(toDelete, picked...)
-	}
-
-	if len(toDelete) == 0 {
-		fmt.Fprintln(os.Stderr, "Cancelled.")
+	if branchesDryRun {
+		reportDryRun(dead, survivors)
 		return nil
 	}
 
-	for _, br := range toDelete {
+	deleteDead(ctx, dead)
+
+	if branchesPruneOnly || len(survivors) == 0 {
+		return nil
+	}
+
+	picked, err := branchpicker.Run(ctx, survivors)
+	if err != nil {
+		return err
+	}
+	if len(picked) == 0 {
+		return nil
+	}
+	deleted := 0
+	for _, br := range picked {
 		if err := gitwt.ForceDeleteBranch(ctx, br.Name); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to delete %s: %v\n", br.Name, err)
+			continue
+		}
+		deleted++
+	}
+	fmt.Fprintf(os.Stderr, "Deleted %d %s.\n", deleted, plural(deleted))
+	return nil
+}
+
+// deleteDead force-deletes every dead branch silently, printing a one-line
+// summary of what went and why.
+func deleteDead(ctx context.Context, dead []gitwt.DeadBranch) {
+	deleted := 0
+	for _, br := range dead {
+		if err := gitwt.ForceDeleteBranch(ctx, br.Name); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to delete %s: %v\n", br.Name, err)
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "  ✗ %s (%s)\n", br.Name, br.Reason)
+		deleted++
+	}
+	if deleted > 0 {
+		fmt.Fprintf(os.Stderr, "Deleted %d dead %s.\n", deleted, plural(deleted))
+	}
+}
+
+func reportDryRun(dead []gitwt.DeadBranch, survivors []gitwt.Branch) {
+	if len(dead) > 0 {
+		fmt.Fprintf(os.Stderr, "Would delete %d dead %s:\n", len(dead), plural(len(dead)))
+		for _, br := range dead {
+			fmt.Fprintf(os.Stderr, "  ✗ %s (%s)\n", br.Name, br.Reason)
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "No dead branches.")
+	}
+	if len(survivors) > 0 {
+		fmt.Fprintf(os.Stderr, "%d stale %s would be offered in the picker:\n", len(survivors), plural(len(survivors)))
+		for _, br := range survivors {
+			fmt.Fprintf(os.Stderr, "  · %s (%s)\n", br.Name, br.AgeStr)
 		}
 	}
+}
 
-	noun := "branch"
-	if len(toDelete) != 1 {
-		noun = "branches"
+func plural(n int) string {
+	if n == 1 {
+		return "branch"
 	}
-	fmt.Fprintf(os.Stderr, "Deleted %d %s.\n", len(toDelete), noun)
-	return nil
+	return "branches"
 }
