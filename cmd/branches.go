@@ -47,8 +47,8 @@ func runBranches(ctx context.Context) error {
 		return errors.New("not inside a git repository")
 	}
 
-	fmt.Fprintln(os.Stderr, "Pruning stale remote-tracking branches...")
-	gitwt.PruneRemoteTracking(ctx)
+	fmt.Fprintln(os.Stderr, "Fetching and pruning remote-tracking branches...")
+	gitwt.FetchPrune(ctx)
 
 	fmt.Fprintln(os.Stderr, "Loading branches...")
 	candidates, err := gitwt.ListCleanupCandidates(ctx, 4*24*time.Hour)
@@ -62,38 +62,16 @@ func runBranches(ctx context.Context) error {
 
 	// Branches whose PR was squash- or rebase-merged on GitHub never show as
 	// merged to git. Best-effort: a gh failure leaves the set empty and we fall
-	// back to the git-only signals (local-merged, upstream-gone).
+	// back to the git-only signals (local-merged, upstream-gone, fully-pushed).
 	mergedPRs, _ := gh.MergedPRHeadBranches(ctx, 200)
-
-	// A branch is dead when any signal says so: its upstream is gone, its PR was
-	// merged on GitHub, or it is merged into the default branch locally.
-	var dead, survivors []gitwt.Branch
-	deadReason := map[string]string{}
-	for _, br := range candidates {
-		switch {
-		case br.RemoteGone:
-			dead = append(dead, br)
-			deadReason[br.Name] = "remote gone"
-		case mergedPRs[br.Name]:
-			dead = append(dead, br)
-			deadReason[br.Name] = "PR merged"
-		case br.IsMerged:
-			dead = append(dead, br)
-			deadReason[br.Name] = "merged"
-		case br.FullyPushed:
-			dead = append(dead, br)
-			deadReason[br.Name] = "on origin"
-		default:
-			survivors = append(survivors, br)
-		}
-	}
+	dead, survivors := gitwt.ClassifyDead(candidates, mergedPRs)
 
 	if branchesDryRun {
-		reportDryRun(dead, survivors, deadReason)
+		reportDryRun(dead, survivors)
 		return nil
 	}
 
-	deleteDead(ctx, dead, deadReason)
+	deleteDead(ctx, dead)
 
 	if branchesPruneOnly || len(survivors) == 0 {
 		return nil
@@ -120,14 +98,14 @@ func runBranches(ctx context.Context) error {
 
 // deleteDead force-deletes every dead branch silently, printing a one-line
 // summary of what went and why.
-func deleteDead(ctx context.Context, dead []gitwt.Branch, reason map[string]string) {
+func deleteDead(ctx context.Context, dead []gitwt.DeadBranch) {
 	deleted := 0
 	for _, br := range dead {
 		if err := gitwt.ForceDeleteBranch(ctx, br.Name); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to delete %s: %v\n", br.Name, err)
 			continue
 		}
-		fmt.Fprintf(os.Stderr, "  ✗ %s (%s)\n", br.Name, reason[br.Name])
+		fmt.Fprintf(os.Stderr, "  ✗ %s (%s)\n", br.Name, br.Reason)
 		deleted++
 	}
 	if deleted > 0 {
@@ -135,11 +113,11 @@ func deleteDead(ctx context.Context, dead []gitwt.Branch, reason map[string]stri
 	}
 }
 
-func reportDryRun(dead, survivors []gitwt.Branch, reason map[string]string) {
+func reportDryRun(dead []gitwt.DeadBranch, survivors []gitwt.Branch) {
 	if len(dead) > 0 {
 		fmt.Fprintf(os.Stderr, "Would delete %d dead %s:\n", len(dead), plural(len(dead)))
 		for _, br := range dead {
-			fmt.Fprintf(os.Stderr, "  ✗ %s (%s)\n", br.Name, reason[br.Name])
+			fmt.Fprintf(os.Stderr, "  ✗ %s (%s)\n", br.Name, br.Reason)
 		}
 	} else {
 		fmt.Fprintln(os.Stderr, "No dead branches.")
