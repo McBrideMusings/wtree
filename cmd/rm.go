@@ -110,7 +110,9 @@ func doRemove(ctx context.Context, repoRoot, target string, force bool) error {
 	return nil
 }
 
-func doRemoveBatch(ctx context.Context, repoRoot string, worktrees []gitwt.Worktree) error {
+// doRemoveBatch removes the given merged worktrees and force-deletes the given
+// dead local branches in one pass. Local only — origin is never touched.
+func doRemoveBatch(ctx context.Context, repoRoot string, worktrees []gitwt.Worktree, branches []string) error {
 	cwd, _ := os.Getwd()
 	needsCD := false
 	for _, w := range worktrees {
@@ -140,6 +142,24 @@ func doRemoveBatch(ctx context.Context, repoRoot string, worktrees []gitwt.Workt
 		fmt.Fprintf(os.Stderr, "Changing directory to %s\n", repoRoot)
 		shim.PrintCD(repoRoot)
 	}
+
+	deletedBranches := 0
+	for _, name := range branches {
+		if err := gitwt.ForceDeleteBranch(ctx, name); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "Deleted branch %s\n", name)
+		deletedBranches++
+	}
+	if deletedBranches > 0 {
+		noun := "branch"
+		if deletedBranches != 1 {
+			noun = "branches"
+		}
+		fmt.Fprintf(os.Stderr, "Pruned %d dead %s.\n", deletedBranches, noun)
+	}
+
 	if len(errs) > 0 {
 		return fmt.Errorf("some removals failed:\n  %s", strings.Join(errs, "\n  "))
 	}

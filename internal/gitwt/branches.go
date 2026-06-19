@@ -10,12 +10,23 @@ import (
 
 // Branch is a local branch eligible for cleanup.
 type Branch struct {
-	Name       string
-	IsMerged   bool
-	IsStale    bool
-	IsPersonal bool // true if the configured user has at least one commit unique to this branch
-	LastCommit time.Time
-	AgeStr     string
+	Name        string
+	IsMerged    bool
+	IsStale     bool
+	IsPersonal  bool // true if the configured user has at least one commit unique to this branch
+	RemoteGone  bool // true if the branch tracked an origin branch that no longer exists
+	FullyPushed bool // true if it tracks an origin branch and is not ahead of it (no local-only commits)
+	LastCommit  time.Time
+	AgeStr      string
+}
+
+// PruneRemoteTracking removes stale remote-tracking refs (origin branches that
+// have been deleted upstream) so that RemoteGone detection is accurate. It makes
+// a network call but never fetches commits and never mutates origin. Errors are
+// swallowed — a repo with no origin, or no network, simply leaves tracking refs
+// as-is and gone detection falls back to whatever is already known locally.
+func PruneRemoteTracking(ctx context.Context) {
+	_, _ = runGitSilent(ctx, "remote", "prune", "origin")
 }
 
 // trimmedGit runs git silently and returns the trimmed stdout.
@@ -48,7 +59,7 @@ func ListCleanupCandidates(ctx context.Context, staleAfter time.Duration) ([]Bra
 	}
 
 	refsOut, err := runGitSilent(ctx, "for-each-ref",
-		"--format=%(refname:short)\t%(committerdate:unix)\t%(committerdate:relative)",
+		"--format=%(refname:short)\t%(committerdate:unix)\t%(committerdate:relative)\t%(upstream:short)\t%(upstream:track)",
 		"refs/heads/")
 	if err != nil {
 		return nil, err
@@ -59,15 +70,23 @@ func ListCleanupCandidates(ctx context.Context, staleAfter time.Duration) ([]Bra
 
 	var result []Branch
 	for _, line := range strings.Split(refsOut, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 3)
+		// Keep empty trailing fields (no upstream / no track), so split on the
+		// raw line, not a trimmed one.
+		parts := strings.SplitN(line, "\t", 5)
 		if len(parts) < 3 {
 			continue
 		}
 		name, tsStr, ageStr := parts[0], parts[1], parts[2]
+		upstream, track := "", ""
+		if len(parts) >= 4 {
+			upstream = strings.TrimSpace(parts[3])
+		}
+		if len(parts) >= 5 {
+			track = parts[4]
+		}
 
 		if name == "" || name == defaultBranch || name == currentBranch {
 			continue
@@ -85,19 +104,28 @@ func ListCleanupCandidates(ctx context.Context, staleAfter time.Duration) ([]Bra
 		merged := mergedSet[name]
 		stale := lastCommit.Before(cutoff)
 		personal := isPersonalBranch(ctx, name, defaultBranch, authorEmail)
+		gone := strings.Contains(track, "gone")
+		// Fully pushed: the branch tracks an origin branch and the local tip is
+		// not ahead of it, so every local commit already exists on origin.
+		// Deleting the local ref loses nothing — origin still has the work.
+		fullyPushed := upstream != "" && !gone && !strings.Contains(track, "ahead")
 
-		// Non-personal branches are always candidates regardless of age.
-		if !merged && !stale && personal {
+		// Gone and fully-pushed branches are provably safe to drop and are
+		// always candidates. Otherwise a fresh personal branch (not merged, not
+		// stale, with local-only work) is still in active use and is skipped.
+		if !gone && !fullyPushed && !merged && !stale && personal {
 			continue
 		}
 
 		result = append(result, Branch{
-			Name:       name,
-			IsMerged:   merged,
-			IsStale:    stale,
-			IsPersonal: personal,
-			LastCommit: lastCommit,
-			AgeStr:     strings.TrimSpace(ageStr),
+			Name:        name,
+			IsMerged:    merged,
+			IsStale:     stale,
+			IsPersonal:  personal,
+			RemoteGone:  gone,
+			FullyPushed: fullyPushed,
+			LastCommit:  lastCommit,
+			AgeStr:      strings.TrimSpace(ageStr),
 		})
 	}
 
