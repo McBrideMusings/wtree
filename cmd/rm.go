@@ -153,11 +153,7 @@ func doRemoveBatch(ctx context.Context, repoRoot string, worktrees []gitwt.Workt
 		deletedBranches++
 	}
 	if deletedBranches > 0 {
-		noun := "branch"
-		if deletedBranches != 1 {
-			noun = "branches"
-		}
-		fmt.Fprintf(os.Stderr, "Pruned %d dead %s.\n", deletedBranches, noun)
+		fmt.Fprintf(os.Stderr, "Pruned %d dead %s.\n", deletedBranches, plural(deletedBranches))
 	}
 
 	if len(errs) > 0 {

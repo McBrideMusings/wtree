@@ -16,17 +16,53 @@ type Branch struct {
 	IsPersonal  bool // true if the configured user has at least one commit unique to this branch
 	RemoteGone  bool // true if the branch tracked an origin branch that no longer exists
 	FullyPushed bool // true if it tracks an origin branch and is not ahead of it (no local-only commits)
+	Ahead       bool // true if the local tip is ahead of its upstream (has unpushed local-only commits)
 	LastCommit  time.Time
 	AgeStr      string
 }
 
-// PruneRemoteTracking removes stale remote-tracking refs (origin branches that
-// have been deleted upstream) so that RemoteGone detection is accurate. It makes
-// a network call but never fetches commits and never mutates origin. Errors are
-// swallowed — a repo with no origin, or no network, simply leaves tracking refs
-// as-is and gone detection falls back to whatever is already known locally.
-func PruneRemoteTracking(ctx context.Context) {
-	_, _ = runGitSilent(ctx, "remote", "prune", "origin")
+// DeadBranch is a cleanup candidate classified as safe to force-delete locally,
+// with the reason it qualified.
+type DeadBranch struct {
+	Name   string
+	Reason string
+}
+
+// ClassifyDead splits cleanup candidates into dead branches — provably safe to
+// force-delete locally, origin untouched — and survivors that still need human
+// judgment. mergedPRs is the set of head branch names whose PR merged on GitHub
+// (from gh.MergedPRHeadBranches); pass an empty map when gh is unavailable.
+//
+// The merged-PR-by-name signal is gated on the branch not being ahead of its
+// upstream: a freshly re-created local branch that reuses a previously merged
+// branch's name carries new local-only commits, so it must not be deleted just
+// because the old name's PR merged. This is the single classifier both
+// `wtree branches` and the dashboard call, so the two can never drift.
+func ClassifyDead(cands []Branch, mergedPRs map[string]bool) (dead []DeadBranch, survivors []Branch) {
+	for _, br := range cands {
+		switch {
+		case br.RemoteGone:
+			dead = append(dead, DeadBranch{br.Name, "remote gone"})
+		case mergedPRs[br.Name] && !br.Ahead:
+			dead = append(dead, DeadBranch{br.Name, "PR merged"})
+		case br.IsMerged:
+			dead = append(dead, DeadBranch{br.Name, "merged"})
+		case br.FullyPushed:
+			dead = append(dead, DeadBranch{br.Name, "on origin"})
+		default:
+			survivors = append(survivors, br)
+		}
+	}
+	return dead, survivors
+}
+
+// FetchPrune fetches origin and prunes stale remote-tracking refs, so both the
+// "remote gone" and "fully pushed" (not-ahead) signals are judged against the
+// current state of origin rather than a stale local snapshot. It never mutates
+// origin. Errors are swallowed — a repo with no origin, or no network, simply
+// classifies against whatever refs are already known locally.
+func FetchPrune(ctx context.Context) {
+	_, _ = runGitSilent(ctx, "fetch", "--prune", "origin")
 }
 
 // trimmedGit runs git silently and returns the trimmed stdout.
@@ -105,10 +141,12 @@ func ListCleanupCandidates(ctx context.Context, staleAfter time.Duration) ([]Bra
 		stale := lastCommit.Before(cutoff)
 		personal := isPersonalBranch(ctx, name, defaultBranch, authorEmail)
 		gone := strings.Contains(track, "gone")
+		ahead := strings.Contains(track, "ahead")
 		// Fully pushed: the branch tracks an origin branch and the local tip is
 		// not ahead of it, so every local commit already exists on origin.
 		// Deleting the local ref loses nothing — origin still has the work.
-		fullyPushed := upstream != "" && !gone && !strings.Contains(track, "ahead")
+		// (Accurate only against current origin, so callers FetchPrune first.)
+		fullyPushed := upstream != "" && !gone && !ahead
 
 		// Gone and fully-pushed branches are provably safe to drop and are
 		// always candidates. Otherwise a fresh personal branch (not merged, not
@@ -124,6 +162,7 @@ func ListCleanupCandidates(ctx context.Context, staleAfter time.Duration) ([]Bra
 			IsPersonal:  personal,
 			RemoteGone:  gone,
 			FullyPushed: fullyPushed,
+			Ahead:       ahead,
 			LastCommit:  lastCommit,
 			AgeStr:      strings.TrimSpace(ageStr),
 		})

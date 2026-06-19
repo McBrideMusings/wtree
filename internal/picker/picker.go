@@ -129,6 +129,7 @@ type behindMsg struct {
 
 type deadBranchesMsg struct {
 	entries []deadEntry
+	err     bool // the git scan failed (distinct from "no dead branches")
 }
 
 type spinnerTickMsg struct{}
@@ -160,6 +161,7 @@ type model struct {
 	spinnerFrame       int
 	dead               []deadEntry // dead local branches with no worktree (dashboard only)
 	deadLoaded         bool
+	deadErr            bool // the dead-branch scan failed
 	action             Action
 	addPRNumber        int
 	finished           bool
@@ -271,32 +273,26 @@ func (m model) Init() tea.Cmd {
 }
 
 // fetchDeadBranches finds local branches with no worktree that are provably
-// dead — upstream gone, PR merged on GitHub, or merged into the default branch.
-// It prunes stale remote-tracking refs first (a network call, never touches
-// origin) so the "remote gone" signal is current. A gh failure degrades to the
-// git-only signals. Mirrors the classification in cmd/branches.go.
+// dead — upstream gone, PR merged on GitHub, merged into the default branch, or
+// fully pushed. It fetches + prunes first (a network call, never touches origin)
+// so the "remote gone" and "fully pushed" signals are judged against current
+// origin. A gh failure degrades to the git-only signals; a git failure sets
+// err so the section can show an "unavailable" hint instead of "none".
+// Classification is shared with `wtree branches` via gitwt.ClassifyDead.
 func fetchDeadBranches(parent context.Context) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 		defer cancel()
-		gitwt.PruneRemoteTracking(ctx)
+		gitwt.FetchPrune(ctx)
 		cands, err := gitwt.ListCleanupCandidates(ctx, 4*24*time.Hour)
 		if err != nil {
-			return deadBranchesMsg{}
+			return deadBranchesMsg{err: true}
 		}
 		mergedPRs, _ := gh.MergedPRHeadBranches(ctx, 200)
-		var entries []deadEntry
-		for _, br := range cands {
-			switch {
-			case br.RemoteGone:
-				entries = append(entries, deadEntry{br.Name, "remote gone"})
-			case mergedPRs[br.Name]:
-				entries = append(entries, deadEntry{br.Name, "PR merged"})
-			case br.IsMerged:
-				entries = append(entries, deadEntry{br.Name, "merged"})
-			case br.FullyPushed:
-				entries = append(entries, deadEntry{br.Name, "on origin"})
-			}
+		dead, _ := gitwt.ClassifyDead(cands, mergedPRs)
+		entries := make([]deadEntry, len(dead))
+		for i, d := range dead {
+			entries[i] = deadEntry{d.Name, d.Reason}
 		}
 		return deadBranchesMsg{entries: entries}
 	}
@@ -523,6 +519,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case deadBranchesMsg:
 		m.deadLoaded = true
+		m.deadErr = msg.err
 		m.dead = msg.entries
 		return m, nil
 	case spinnerTickMsg:
@@ -722,9 +719,9 @@ func (m model) loading() bool {
 	if !m.reviewStatesLoaded {
 		return true
 	}
-	if !m.deadLoaded {
-		return true
-	}
+	// The dead-branch scan does a network fetch+prune; it does NOT gate the
+	// render. The dashboard paints as soon as worktrees, review states, and the
+	// inbox are ready, and the PRUNABLE BRANCHES row fills in when it arrives.
 	return !m.inboxLoaded
 }
 
@@ -1224,6 +1221,10 @@ func (m model) writeInbox(b *strings.Builder, width int, isCursor func(selItem) 
 // is never enumerated here, so the section stays one line regardless of count.
 func (m model) writePrunableBranches(b *strings.Builder, width int, isCursor func(selItem) bool) {
 	if len(m.dead) == 0 {
+		if m.deadErr {
+			b.WriteString("\n")
+			b.WriteString(styleFooter.Render("  (prunable branches unavailable — branch scan failed)") + "\n")
+		}
 		return
 	}
 	b.WriteString("\n")
