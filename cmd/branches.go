@@ -22,14 +22,15 @@ var (
 var branchesCmd = &cobra.Command{
 	Use:   "branches",
 	Short: "clean up dead and stale local branches",
-	Long: `Force-deletes local branches that are provably dead — a merged or closed
-PR, an upstream branch that was deleted on origin, or merged into the default
-branch — with no prompt. Anything that survives is offered in a picker.
+	Long: `Finds local branches that are provably dead — a merged or closed PR, an
+upstream branch deleted on origin, or work already fully on origin — lists them,
+and force-deletes them after you confirm. Anything that survives is offered in a
+picker.
 
 Only local branches are ever deleted; origin is never touched.
 
-  wtree branches            delete dead branches, then pick from the stale rest
-  wtree branches --prune    delete dead branches only, skip the picker
+  wtree branches            list dead branches, confirm, then pick from the rest
+  wtree branches --prune    delete dead branches with no prompt (for scripts)
   wtree branches --dry-run  show what would be deleted, delete nothing`,
 	RunE: func(c *cobra.Command, args []string) error {
 		return runBranches(c.Context())
@@ -71,7 +72,17 @@ func runBranches(ctx context.Context) error {
 		return nil
 	}
 
-	deleteDead(ctx, dead)
+	if len(dead) > 0 {
+		listDead(dead)
+		// --prune is the scriptable, no-prompt path; the default lists what it
+		// will remove and waits for a y/n first.
+		if branchesPruneOnly || confirm(fmt.Sprintf("Delete %d dead %s? (enter/y: yes · esc/n: skip) ", len(dead), plural(len(dead)))) {
+			n := deleteDead(ctx, dead)
+			fmt.Fprintf(os.Stderr, "Deleted %d dead %s.\n", n, plural(n))
+		} else {
+			fmt.Fprintln(os.Stderr, "Skipped dead branches.")
+		}
+	}
 
 	if branchesPruneOnly || len(survivors) == 0 {
 		return nil
@@ -96,21 +107,26 @@ func runBranches(ctx context.Context) error {
 	return nil
 }
 
-// deleteDead force-deletes every dead branch silently, printing a one-line
-// summary of what went and why.
-func deleteDead(ctx context.Context, dead []gitwt.DeadBranch) {
+// listDead prints the dead branches that are about to be deleted, one per line
+// with the reason each qualified.
+func listDead(dead []gitwt.DeadBranch) {
+	fmt.Fprintf(os.Stderr, "%d dead %s to delete (local only — origin untouched):\n", len(dead), plural(len(dead)))
+	for _, br := range dead {
+		fmt.Fprintf(os.Stderr, "  ✗ %s (%s)\n", br.Name, br.Reason)
+	}
+}
+
+// deleteDead force-deletes every dead branch and returns how many were removed.
+func deleteDead(ctx context.Context, dead []gitwt.DeadBranch) int {
 	deleted := 0
 	for _, br := range dead {
 		if err := gitwt.ForceDeleteBranch(ctx, br.Name); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to delete %s: %v\n", br.Name, err)
 			continue
 		}
-		fmt.Fprintf(os.Stderr, "  ✗ %s (%s)\n", br.Name, br.Reason)
 		deleted++
 	}
-	if deleted > 0 {
-		fmt.Fprintf(os.Stderr, "Deleted %d dead %s.\n", deleted, plural(deleted))
-	}
+	return deleted
 }
 
 func reportDryRun(dead []gitwt.DeadBranch, survivors []gitwt.Branch) {
