@@ -296,9 +296,10 @@ const (
 	// ReviewInProgress means the PR is out for review with nothing for the
 	// author to do — no feedback yet, or the author already responded last.
 	ReviewInProgress ReviewClass = iota
-	// ReviewChangesRequested means a reviewer left changes/comments the author
-	// hasn't responded to yet (formal change request, or an informal comment
-	// where the reviewer was the most recent actor).
+	// ReviewChangesRequested means there's an outstanding change request the
+	// author hasn't answered yet — a formal CHANGES_REQUESTED review, or an
+	// unresolved inline review thread from someone else, newer than the author's
+	// last push or in-thread reply. Plain conversation comments don't count.
 	ReviewChangesRequested
 	// ReviewApproved means the PR is approved and ready to merge.
 	ReviewApproved
@@ -312,8 +313,8 @@ query($q: String!) {
       ... on PullRequest {
         headRefName
         reviewDecision
-        reviews(last: 50) { nodes { author { login } submittedAt } }
-        comments(last: 50) { nodes { author { login } createdAt } }
+        reviews(last: 50) { nodes { author { login } state submittedAt } }
+        reviewThreads(first: 50) { nodes { isResolved comments(first: 50) { nodes { author { login } createdAt } } } }
         commits(last: 1) { nodes { commit { committedDate } } }
       }
     }
@@ -347,17 +348,23 @@ func MyOpenPRReviewStates(ctx context.Context, nwo string) (map[string]ReviewCla
 							Author struct {
 								Login string `json:"login"`
 							} `json:"author"`
+							State       string `json:"state"`
 							SubmittedAt string `json:"submittedAt"`
 						} `json:"nodes"`
 					} `json:"reviews"`
-					Comments struct {
+					ReviewThreads struct {
 						Nodes []struct {
-							Author struct {
-								Login string `json:"login"`
-							} `json:"author"`
-							CreatedAt string `json:"createdAt"`
+							IsResolved bool `json:"isResolved"`
+							Comments   struct {
+								Nodes []struct {
+									Author struct {
+										Login string `json:"login"`
+									} `json:"author"`
+									CreatedAt string `json:"createdAt"`
+								} `json:"nodes"`
+							} `json:"comments"`
 						} `json:"nodes"`
-					} `json:"comments"`
+					} `json:"reviewThreads"`
 					Commits struct {
 						Nodes []struct {
 							Commit struct {
@@ -380,42 +387,48 @@ func MyOpenPRReviewStates(ctx context.Context, nwo string) (map[string]ReviewCla
 			continue
 		}
 
-		// Split review/comment activity into the reviewer's last word vs. my own
-		// last response. A newer push (latest commit) also counts as a response.
+		// Measure outstanding change requests, not conversation recency. Two
+		// signals count as a reviewer asking for changes: a formal
+		// CHANGES_REQUESTED review, and an unresolved inline review thread with a
+		// comment from someone other than me. A plain conversation comment
+		// ("looks great") is neither, so it never trips this. My own response is
+		// my latest push, or my latest reply inside an unresolved thread.
 		var lastFeedback, lastSelf time.Time
-		note := func(login, ts string) {
-			t, err := time.Parse(time.RFC3339, ts)
-			if err != nil {
-				return
-			}
-			if strings.EqualFold(login, me) {
-				if t.After(lastSelf) {
-					lastSelf = t
-				}
-			} else if t.After(lastFeedback) {
-				lastFeedback = t
+		bump := func(t *time.Time, ts string) {
+			if v, err := time.Parse(time.RFC3339, ts); err == nil && v.After(*t) {
+				*t = v
 			}
 		}
 		for _, r := range n.Reviews.Nodes {
-			note(r.Author.Login, r.SubmittedAt)
+			if r.State == "CHANGES_REQUESTED" && !strings.EqualFold(r.Author.Login, me) {
+				bump(&lastFeedback, r.SubmittedAt)
+			}
 		}
-		for _, c := range n.Comments.Nodes {
-			note(c.Author.Login, c.CreatedAt)
+		for _, th := range n.ReviewThreads.Nodes {
+			if th.IsResolved {
+				continue
+			}
+			for _, c := range th.Comments.Nodes {
+				if strings.EqualFold(c.Author.Login, me) {
+					bump(&lastSelf, c.CreatedAt)
+				} else {
+					bump(&lastFeedback, c.CreatedAt)
+				}
+			}
 		}
 		if len(n.Commits.Nodes) > 0 {
-			if t, err := time.Parse(time.RFC3339, n.Commits.Nodes[0].Commit.CommittedDate); err == nil && t.After(lastSelf) {
-				lastSelf = t // a push after their feedback means I've responded
-			}
+			bump(&lastSelf, n.Commits.Nodes[0].Commit.CommittedDate) // a push counts as my response
 		}
 
 		switch {
 		case n.ReviewDecision == "APPROVED":
 			states[n.HeadRefName] = ReviewApproved
 		case !lastFeedback.IsZero() && lastFeedback.After(lastSelf):
-			// A reviewer spoke last and I haven't responded (no later comment or push).
+			// An outstanding change request I haven't answered (no later push or
+			// in-thread reply).
 			states[n.HeadRefName] = ReviewChangesRequested
 		default:
-			// No feedback yet, or I responded last (comment or commit).
+			// No change request, or I responded last (push or in-thread reply).
 			states[n.HeadRefName] = ReviewInProgress
 		}
 	}
