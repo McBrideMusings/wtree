@@ -3,4 +3,4 @@
 /dist/
 .worktrees
 *.local.*
-.claude/skills/verify/
+.claude/skills/verify-project/
